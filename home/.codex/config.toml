@@ -1,0 +1,10 @@
+[tui]
+vim_mode_default = true
+status_line = ["model-with-reasoning", "current-dir", "thread-name", "context-used"]
+status_line_use_colors = true
+
+[tui.keymap.composer]
+submit = ["shift-enter"]
+
+[tui.keymap.editor]
+insert_newline = ["enter"]

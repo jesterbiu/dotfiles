@@ -1,0 +1,2 @@
+#!/usr/bin/env -S jq -f
+with_entries(select(.key | IN("theme", "quietStartup", "hideThinkingBlock", "packages", "extensions")))

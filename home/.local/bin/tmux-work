@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Use a dedicated, systemd-owned server without touching ordinary tmux.
+set -e
+systemctl --user start tmux-work.service
+if (( $# )); then
+    exec /usr/bin/tmux -L work "$@"
+fi
+if ! /usr/bin/tmux -L work has-session 2>/dev/null; then
+    /usr/bin/tmux -L work new-session -d -s main
+fi
+exec /usr/bin/tmux -L work attach-session

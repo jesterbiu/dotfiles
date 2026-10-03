@@ -1,0 +1,12 @@
+{
+  "theme": "dark",
+  "packages": [
+    "npm:pi-vim@0.14.2",
+    "../../src/feature/pi-ext/background-task"
+  ],
+  "extensions": [
+    "../../src/feature/pi-ext/subagent/index.ts"
+  ],
+  "quietStartup": true,
+  "hideThinkingBlock": true
+}

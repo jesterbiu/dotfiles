@@ -1,0 +1,8 @@
+[Unit]
+Description=Check continuum snapshot for the work tmux server
+Requisite=tmux-work.service
+After=tmux-work.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/tmux -L work run-shell '%h/.tmux/plugins/tmux-continuum/scripts/continuum_save.sh'

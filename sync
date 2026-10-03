@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")" && pwd)
+mapfile -t paths < <(grep -v '^[[:space:]]*$' "$repo/manifest")
+
+covered() {
+  local p
+  for p in "${paths[@]}"; do
+    [[ $1 == "$p" || $1 == "$p"/* ]] && return 0
+  done
+  return 1
+}
+
+errors=()
+for p in "${paths[@]}"; do
+  [ -e "$HOME/$p" ] || errors+=("missing in \$HOME: $p")
+done
+
+pi_settings=$HOME/.pi/agent/settings.json
+if [ -f "$pi_settings" ]; then
+  while IFS= read -r entry; do
+    [[ $entry =~ ^[a-z]+: ]] && continue
+    [[ $entry == /* ]] || entry=$HOME/.pi/agent/$entry
+    resolved=$(realpath -m "$entry")
+    rel=${resolved#"$HOME"/}
+    covered "$rel" || errors+=("Pi local path not in manifest: $rel")
+  done < <(jq -r '(.packages // [], .extensions // [])[] | if type == "object" then .source else . end' "$pi_settings")
+fi
+
+if [ ${#errors[@]} -gt 0 ]; then
+  printf '%s\n' "${errors[@]}" >&2
+  exit 1
+fi
+
+stage=$(mktemp -d "$repo/.home.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+for p in "${paths[@]}"; do
+  mkdir -p "$stage/$(dirname "$p")"
+  if [ -x "$repo/distill/$p" ]; then
+    "$repo/distill/$p" < "$HOME/$p" > "$stage/$p"
+    chmod --reference="$HOME/$p" "$stage/$p"
+  else
+    cp -a "$HOME/$p" "$stage/$p"
+  fi
+done
+
+rm -rf "$repo/home"
+mv "$stage" "$repo/home"

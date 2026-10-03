@@ -1,0 +1,17 @@
+{
+  "model": "opus",
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
+  },
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "medium"
+    }
+  },
+  "autoCompactWindow": 300000,
+  "autoUpdatesChannel": "stable",
+  "tui": "fullscreen",
+  "theme": "dark",
+  "editorMode": "vim"
+}

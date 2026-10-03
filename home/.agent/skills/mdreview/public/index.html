@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mdreview</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #6e7781;
+  --border: #d0d7de;
+  --panel: #f6f8fa;
+  --mark: #fff3a3;
+  --mark-active: #ffd33d;
+  --resolved: #e7ecf0;
+  --accent: #0969da;
+  --open: #d4a72c;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8d96a0;
+    --border: #30363d;
+    --panel: #161b22;
+    --mark: #5c4a00;
+    --mark-active: #8a6d00;
+    --resolved: #262c33;
+    --accent: #4493f8;
+    --open: #e3b341;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 820px) 320px;
+  gap: 32px;
+  justify-content: center;
+  padding: 24px 16px;
+}
+#doc { min-width: 0; }
+#doc pre { background: var(--panel); padding: 12px; overflow-x: auto; border-radius: 6px; }
+#doc code { font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+#doc table { border-collapse: collapse; }
+#doc th, #doc td { border: 1px solid var(--border); padding: 4px 10px; }
+#doc blockquote { margin: 0; padding: 0 1em; color: var(--muted); border-left: 4px solid var(--border); }
+#doc a { color: var(--accent); }
+#doc mark { background: var(--mark); color: inherit; cursor: pointer; }
+#doc mark.resolved { background: none; text-decoration: underline dotted var(--muted); }
+#doc mark.active { background: var(--mark-active); }
+.diagram { margin: 1em 0; overflow-x: auto; }
+.diagram .node, .diagram .edge-hit { cursor: pointer; }
+.diagram .edge-hit { fill: none; stroke: transparent; stroke-width: 12px; pointer-events: stroke; }
+.diagram .node.c-open :is(rect, circle, ellipse, polygon, path) { stroke: var(--open) !important; stroke-width: 3px !important; }
+.diagram .node.c-resolved :is(rect, circle, ellipse, polygon, path) { stroke-dasharray: 4 3 !important; }
+.diagram path.c-open { stroke: var(--open) !important; stroke-width: 3px !important; }
+.diagram path.c-resolved { stroke-dasharray: 4 3 !important; }
+.diagram .active :is(rect, circle, ellipse, polygon, path), .diagram path.active { stroke: var(--accent) !important; stroke-width: 4px !important; }
+.diagram-error { color: #cf222e; white-space: pre-wrap; }
+aside { position: sticky; top: 16px; align-self: start; max-height: calc(100vh - 32px); overflow-y: auto; font-size: 14px; }
+aside h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+.entry { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; background: var(--bg); cursor: pointer; }
+.entry.resolved { background: var(--resolved); color: var(--muted); }
+.entry.active { border-color: var(--accent); }
+.entry .where { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.entry .text { white-space: pre-wrap; margin: 4px 0; }
+.entry .meta { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.entry .meta .spacer { flex: 1; }
+.badge { font-size: 11px; padding: 0 6px; border-radius: 10px; border: 1px solid var(--border); }
+.badge.orphaned { color: #cf222e; border-color: #cf222e; }
+button { font: inherit; font-size: 12px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+#comment-button { position: absolute; display: none; z-index: 10; }
+#comment-box { position: absolute; display: none; z-index: 11; width: 300px; padding: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); }
+#comment-box .where { font-size: 12px; color: var(--muted); margin-bottom: 6px; max-height: 3.2em; overflow: hidden; }
+#comment-box textarea { width: 100%; min-height: 80px; font: inherit; font-size: 14px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; }
+#comment-box .actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+@media (max-width: 1100px) {
+  .layout { grid-template-columns: minmax(0, 820px); }
+  aside { position: static; max-height: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+  <main id="doc"></main>
+  <aside>
+    <h2 id="summary">Comments</h2>
+    <div id="entries"></div>
+  </aside>
+</div>
+<button id="comment-button" class="primary">Comment</button>
+<div id="comment-box">
+  <div class="where"></div>
+  <textarea placeholder="Comment"></textarea>
+  <div class="actions">
+    <button data-action="cancel">Cancel</button>
+    <button data-action="save" class="primary">Save</button>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.15.0/mermaid.min.js"></script>
+<script type="module" src="/_/app.js"></script>
+</body>
+</html>

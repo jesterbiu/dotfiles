@@ -1,0 +1,15 @@
+{
+  "name": "mdreview",
+  "version": "0.1.0",
+  "description": "Review loop for markdown design docs: comment in the browser, resolve with any coding agent",
+  "type": "module",
+  "bin": {
+    "mdreview": "bin/mdreview.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

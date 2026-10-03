@@ -1,0 +1,13 @@
+[Unit]
+Description=Logout-safe tmux work server
+
+[Service]
+Type=forking
+WorkingDirectory=%h
+ExecStart=/usr/bin/tmux -L work new-session -d -s main
+ExecStop=-/usr/bin/tmux -L work run-shell '%h/.tmux/plugins/tmux-resurrect/scripts/save.sh quiet'
+ExecStop=-/usr/bin/tmux -L work kill-server
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
