@@ -5,7 +5,8 @@
     "../../src/feature/pi-ext/background-task"
   ],
   "extensions": [
-    "../../src/feature/pi-ext/subagent/index.ts"
+    "../../src/feature/pi-ext/subagent/index.ts",
+    "../../src/feature/pi-ext/statusline/index.ts"
   ],
   "quietStartup": true,
   "hideThinkingBlock": true

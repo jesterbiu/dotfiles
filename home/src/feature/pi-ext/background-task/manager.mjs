@@ -132,6 +132,7 @@ export class TaskManager {
     if (!taskIdPattern.test(taskId ?? '') || (expectedTaskId && taskId !== expectedTaskId) || record.owner !== this.owner || record.tmuxSession !== `${this.prefix}${taskId}`) throw new Error('Invalid task identity');
     const taskDir = this.taskDir(taskId);
     if (record.taskDir !== taskDir || record.metadataPath !== this.metadataPath(taskId) || record.stdoutPath !== join(taskDir, 'stdout.log') || record.stderrPath !== join(taskDir, 'stderr.log') || record.exitPath !== join(taskDir, 'exit')) throw new Error('Invalid task paths');
+    if (record.notificationTarget !== undefined && record.notificationTarget !== 'subagent') throw new Error('Invalid notification target');
     if (typeof record.command !== 'string' || typeof record.cwd !== 'string' || !Number.isFinite(record.startedAt)) throw new Error('Invalid task launch record');
     if (record.deadline !== null && !Number.isFinite(record.deadline)) throw new Error('Invalid task deadline');
     if (record.reportIntervalMs !== null && (!Number.isFinite(record.reportIntervalMs) || record.reportIntervalMs <= 0)) throw new Error('Invalid task report interval');
@@ -236,6 +237,9 @@ export class TaskManager {
       exitCode: outcome?.exitCode ?? null,
       exitSignal: outcome?.exitSignal ?? null,
       reason: outcome?.reason,
+      notificationTarget: record.notificationTarget,
+      deadline: record.deadline,
+      statusReport: record.reportIntervalMs === null ? undefined : { afterSeconds: record.reportIntervalMs / 1000, repeat: record.repeatReport },
     };
   }
 
@@ -335,7 +339,7 @@ export class TaskManager {
     if (code !== null) return this.finishNatural(record, { exitCode: code, exitSignal: null }, action);
     if (absent(pane)) {
       const completed = await this.persistOutcome(record, { status: 'unknown', endedAt: this.now(), exitCode: null, exitSignal: null, reason: absence(pane) }, action, [absence(pane)]);
-      if (action !== 'cancel') this.notify('completion', this.publicTask(completed));
+      if (action !== 'cancel' || record.notificationTarget === 'subagent') this.notify('completion', this.publicTask(completed));
       return this.publicTask(completed);
     }
     if (pane.dead) return this.finishNatural(record, pane, action);
@@ -413,6 +417,18 @@ export class TaskManager {
     return tasks;
   }
 
+  async snapshot() {
+    const tasks = await Promise.all((await this.taskIds()).map(async taskId => {
+      try {
+        return await this.withTask(taskId, async () => this.publicTask(await this.readMetadata(taskId)));
+      } catch (cause) {
+        this.reportError(operationError('snapshot', taskId, cause));
+        return undefined;
+      }
+    }));
+    return tasks.filter(task => task !== undefined);
+  }
+
   async list() {
     let ids;
     try {
@@ -442,7 +458,8 @@ export class TaskManager {
     return this.withTask(taskId, () => this.startTask(taskId, options));
   }
 
-  async startTask(taskId, { command, cwd, timeoutSeconds, statusReport }) {
+  async startTask(taskId, { command, cwd, timeoutSeconds, statusReport, notificationTarget }) {
+    if (notificationTarget !== undefined && notificationTarget !== 'subagent') throw operationError('start', taskId, new Error('Invalid notification target'));
     if (typeof command !== 'string' || !command.trim()) throw operationError('start', taskId, new Error('Command is required'));
     for (const value of [timeoutSeconds, statusReport?.afterSeconds]) if (value !== undefined && (!Number.isFinite(value) || value <= 0)) throw operationError('start', taskId, new Error('Intervals must be positive finite numbers'));
     if (statusReport && statusReport.afterSeconds === undefined) throw operationError('start', taskId, new Error('Report interval is required'));
@@ -472,7 +489,7 @@ export class TaskManager {
       reportIntervalMs: statusReport ? statusReport.afterSeconds * 1000 : null,
       repeatReport: statusReport?.repeat === true,
       nextReportAt: statusReport ? startedAt + statusReport.afterSeconds * 1000 : null,
-      launch: { status: 'created', createdAt: startedAt }, outcome: null, operationErrors: [],
+      launch: { status: 'created', createdAt: startedAt }, outcome: null, operationErrors: [], notificationTarget,
     };
     try {
       await this.writeMetadata(record);

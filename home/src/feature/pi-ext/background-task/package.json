@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/manager.test.mjs test/review.test.mjs",
+    "test": "node --test test/manager.test.mjs test/review.test.mjs test/output.test.mjs",
     "test:pi": "node --test test/pi.test.mjs"
   },
   "peerDependencies": {

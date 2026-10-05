@@ -1,6 +1,6 @@
 # Pi background tasks through tmux
 
-Status: accepted design, implemented in `background-task/`.
+Accepted design.
 
 ## Goals
 
@@ -8,7 +8,7 @@ Status: accepted design, implemented in `background-task/`.
 - Make task IDs, status, output files, and asynchronous notifications the agent interface. Keep tmux as an internal execution backend.
 - Keep tasks owned by their Pi session. Cancel unfinished tasks on session discontinuation and controlled Pi process exit.
 - Use ordinary metadata storage and best-effort pane cancellation, not a process supervisor or recovery framework.
-- Leave room for a later subagent backend without implementing subagents now.
+- Own process observation for delegated workers while routing their notices through the subagent extension.
 
 ## Decisions
 
@@ -34,15 +34,17 @@ Storage direction: one metadata file per task. SQLite has not been selected. If 
 
 ## Interface
 
-- `start(command, cwd, timeoutSeconds?, statusReport?)`: launch and return promptly with task ID, owner, status, metadata path, and stdout/stderr paths.
+- `start(command, cwd, timeoutSeconds?, statusReport?, notificationTarget?)`: launch and return promptly with `taskId`, `process`, one `artifacts` root, and requested deadline/report settings. `notificationTarget: 'subagent'` is reserved for delegated workers.
 - `status(id)`: inspect one task once, record a completion found on disk or in tmux, and return its current state.
-- `list()`: list this owner's stored tasks, including completed tasks. Query tmux for current execution evidence where needed. Report unreadable records individually inside `tasks`, as `{taskId, metadataPath, error}`; reserve `errors` for task discovery failures.
+- `list()`: list this owner's stored tasks, including completed tasks. Query tmux for current execution evidence where needed. Report unreadable records individually inside `tasks`, with identity, artifact root, unknown process state, and an error. Reserve `errors` for task discovery failures; omit it when empty.
 - `cancel(id)`: request removal of the target task's tmux session and record the result. Return a task-local result or an identified error.
 - `cancelAll()`: attempt cancellation of all owner tasks; return per-task results and errors.
 
 There is no `wait` operation, wait timeout, or waiter registry. The agent receives asynchronous completion/status notifications and can use `list` or existing file tools for inspection.
 
-Timeout support is an optional launch-time execution deadline. Optional status reports use a configured interval and one-shot or repeat behavior. Deadline updates are deferred. No automatic retry of commands.
+Timeout support is an optional launch-time deadline for total task lifetime. Optional status reports use a configured interval and one-shot or repeat behavior; they are process notices, not model callbacks. Deadline updates are deferred. No automatic retry of commands.
+
+Both tool content and details use compact output helpers. Keep full manager records in files and retain the internal manager API shape. Return identity, actionable state, recovery information, and one artifact root; omit empty errors and absent optional fields. `process` is separate from delegated-work success. Reported errors redact selected URL/credential patterns and control characters and cap text at 300 characters; raw diagnostics are not fully redacted.
 
 ## Storage and execution
 
@@ -90,7 +92,7 @@ Commands currently inherit the shared tmux server's environment, which can be ol
 ## Error boundaries and coordination
 
 - Targeted operations read or change only the target task's state. They must not depend on successful parsing or collection of every owner's task.
-- Return errors with `{action, taskId, cause}` and identify side effects that already occurred. Preserve these fields in serialized tool and batch results. Failure does not imply rollback.
+- Return compact errors with `{action, taskId, error}` and identify side effects that already occurred. Preserve actionable fields in serialized tool and batch results. Internal manager errors retain their full cause. Failure does not imply rollback.
 - Each watcher event observes one task. A failure ends that task's observation, not the observation of another task or another API call.
 - `list`, `cancelAll`, and owner cleanup report per-task failures while continuing healthy tasks. Cleanup discovers owned tmux resources independently of metadata parsing.
 - An unreachable tmux server means every owned pane is gone: observation and cancellation record `unknown` with reason `tmux server unreachable` for tasks without an outcome, and owner cleanup succeeds with no sessions to remove. Transport, timeout, and permission errors stay errors; do not reinterpret them as an empty successful listing.
@@ -133,9 +135,13 @@ Task outcomes are `succeeded`, `failed`, `cancelled`, `timed_out`, or `unknown`.
 | Abrupt Pi death | No cleanup guarantee. Prefixed resources permit explicit manual cleanup. |
 | tmux failure | Report errors or unknown outcomes where justified; never restart commands automatically. |
 
-Emit compact completion/status notices with task IDs and file paths. Suppress notices during owner discontinuation. Delivery is best-effort; no exactly-once processing or replay guarantee.
+Emit compact completion/status notices with task identity, process state, and one artifact root. Suppress notices during owner discontinuation. Delivery is best effort; no exactly-once processing or replay guarantee. Automatic notices make routine polling unnecessary; status/list can reconcile after interruption.
 
-Delivery is notify-only through `pi.sendMessage` with `triggerTurn: false`. Pi defers busy-session messages until the current turn ends and appends idle-session messages without a model call. Automatic model wake-up is deferred.
+Persist optional `notificationTarget: 'subagent'` in task metadata. For those tasks only, emit `{ owner, type, task }` on Pi's `background-task:subagent` event bus instead of sending a background-task custom message. The routed task includes start/end timing for the footer, without adding it to public tool returns. The subagent extension combines that process evidence with its result artifact and delivers the notice. Background-task remains lifecycle owner and observer. Standalone task notices are unchanged in ownership, but use the compact payload shape. No second observer or replay queue.
+
+A metadata-only `background-task:snapshot` request supports footer restoration. Read each record under the existing task lock; report and skip invalid records independently. Do not inspect tmux or reconcile outcomes through this UI snapshot. Emit `background-task:ready` after initial observation, and suppress delegated startup-reconciliation events to prevent completion replay regardless of extension load order. Emit `background-task:owner-cleanup` before manager shutdown so subagent callbacks cannot wake the old owner during cleanup. Reload still preserves processes.
+
+Standalone background-task delivery is notify-only through `pi.sendMessage` with `triggerTurn: false`. Pi defers busy-session messages until the current turn ends and appends idle-session messages without a model call. Delegated events use the subagent route; that extension wakes the parent on termination and owns its footer/transcript presentation. Background-task itself does not wake the model.
 
 ## Integration and limits
 
@@ -151,8 +157,9 @@ Delivery is notify-only through `pi.sendMessage` with `triggerTurn: false`. Pi d
 ## Implementation and regression contract
 
 - `background-task/manager.mjs`: metadata, tmux execution, task-local coordination, and observation.
-- `background-task/index.ts`: tool schema, structured errors, and Pi lifecycle hooks.
-- `npm test`: manager and review-runner tests. `npm run test:pi`: Pi SDK lifecycle test.
+- `background-task/index.ts`: tool schema, structured errors, notice routing, and Pi lifecycle hooks.
+- `background-task/output.mjs`: compact task/error responses and bounded reported-error sanitization.
+- `npm test`: manager, output-contract, and review-runner tests. `npm run test:pi`: Pi SDK lifecycle test.
 - `scripts/review.mjs`: event-driven review runner on an isolated Pi session.
 
 The regression contract:

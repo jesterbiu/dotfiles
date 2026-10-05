@@ -40,3 +40,8 @@ Use TDD by default:
 
 The main session is for design and conversation with the user. Keep planning and decisions there. Anything that can block it for more than a moment, such as long or unbounded commands, bulk reads, goes to a subagent or the background even when a tool description suggests one inline script would suffice. A blocked main session stalls the design flow.
 
+Subagent routing rules:
+1. Claude Code, follow profiles.
+2. Codex/Pi, use gpt-6.1-sol for subagent by default.
+
+

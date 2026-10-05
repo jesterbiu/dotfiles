@@ -3,12 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/worker.test.mjs test/controller.test.mjs",
-    "test:pi": "node --test test/pi.test.mjs"
+    "test": "node --test test/worker.test.mjs test/controller.test.mjs test/tasks.test.mjs",
+    "test:pi": "node --test test/pi.test.mjs test/ui.test.mjs ../statusline/test/pi.test.mjs ../statusline/test/ui.test.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-ai": "*"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "pi": {
     "extensions": [

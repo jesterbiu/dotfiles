@@ -6,10 +6,10 @@ You read the rendered doc in the browser and comment on a text selection or on a
 
 ## Install
 
-Requires Node 22. No npm install. The tool lives at `~/.agent/skills/mdreview`.
+Requires Node 22. No npm install. The tool lives at `~/.agents/skills/mdreview`.
 
 ```sh
-ln -s ~/.agent/skills/mdreview/bin/mdreview.js ~/.local/bin/mdreview
+ln -s ~/.agents/skills/mdreview/bin/mdreview.js ~/.local/bin/mdreview
 ```
 
 Server as a systemd user service, `~/.config/systemd/user/mdreview.service`:
@@ -19,7 +19,7 @@ Server as a systemd user service, `~/.config/systemd/user/mdreview.service`:
 Description=mdreview markdown review server
 
 [Service]
-ExecStart=/usr/bin/node %h/.agent/skills/mdreview/bin/mdreview.js serve --port 4747
+ExecStart=/usr/bin/node %h/.agents/skills/mdreview/bin/mdreview.js serve --port 4747 --host 0.0.0.0
 Restart=on-failure
 
 [Install]
@@ -34,8 +34,8 @@ systemctl --user enable --now mdreview
 Skill for agents that read skills (`SKILL.md` in this directory):
 
 ```sh
-ln -s ~/.agent/skills/mdreview ~/.claude/skills/mdreview
-ln -s ~/.agent/skills/mdreview ~/.codex/skills/mdreview
+ln -s ~/.agents/skills/mdreview ~/.claude/skills/mdreview
+ln -s ~/.agents/skills/mdreview ~/.codex/skills/mdreview
 ```
 
 Ignore comment files in every git repo:
@@ -48,12 +48,12 @@ echo '*.comments.json' >> ~/.config/git/ignore
 ## Commands
 
 ```sh
-mdreview serve [--port 4747]
+mdreview serve [--port 4747] [--host 127.0.0.1]
 mdreview comments <doc.md>
 mdreview resolve <doc.md> <id>...
 ```
 
-- `serve` runs one server on 127.0.0.1, port 4747 by default. It exits if the port is taken.
+- `serve` runs one server on 127.0.0.1, port 4747 by default. It exits if the port is taken. `--host 0.0.0.0` makes it reachable from other devices on the LAN, such as a phone, and prints the LAN URLs. The server has no authentication: every device on the network can read all `.md` files under home and write comments.
 - `comments` prints each open comment as a block: the id and the source line its anchor points to, the quote (cut at 120 characters) or the diagram node/edge with its label, and the note. A diagram anchor points to the line of its mermaid fence. An anchor that no longer matches prints `line ?`. With no open comments it prints `no open comments`.
 - `resolve` sets `status` to `resolved` on the given ids and changes nothing else in the file. If an id does not exist, it names it, exits 1, and writes nothing.
 

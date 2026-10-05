@@ -13,6 +13,9 @@ const commentButton = document.getElementById("comment-button");
 const box = document.getElementById("comment-box");
 const boxWhere = box.querySelector(".where");
 const boxText = box.querySelector("textarea");
+const tocEl = document.getElementById("toc");
+const tocEntries = document.getElementById("toc-entries");
+tocEl.open = matchMedia("(min-width: 1301px)").matches;
 
 const dark = matchMedia("(prefers-color-scheme: dark)").matches;
 mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "default", suppressErrorRendering: true });
@@ -47,7 +50,47 @@ async function renderDoc() {
   hide(commentButton);
   docEl.replaceChildren(...fresh.childNodes);
   diagramTargets = [...docEl.querySelectorAll(".diagram")].flatMap(bindDiagram);
+  renderToc();
   window.scrollTo(0, scroll);
+}
+
+function renderToc() {
+  const folded = new Set([...tocEntries.querySelectorAll("details:not([open])")].map((d) => d.dataset.id));
+  const used = new Map();
+  const root = { level: 0, children: [] };
+  const stack = [root];
+  for (const heading of docEl.querySelectorAll("h1, h2, h3, h4, h5, h6")) {
+    heading.id = uniqueSlug(heading.textContent, used);
+    const node = { level: Number(heading.tagName[1]), heading, children: [] };
+    while (stack.at(-1).level >= node.level) stack.pop();
+    stack.at(-1).children.push(node);
+    stack.push(node);
+  }
+  tocEntries.replaceChildren(tocList(root.children, folded));
+  tocEl.hidden = !root.children.length;
+}
+
+function uniqueSlug(text, used) {
+  const base = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "") || "section";
+  const count = (used.get(base) ?? 0) + 1;
+  used.set(base, count);
+  return count === 1 ? base : `${base}-${count}`;
+}
+
+function tocList(nodes, folded) {
+  return el(
+    "ul",
+    "",
+    ...nodes.map(({ heading, children }) => {
+      const link = el("a", "", heading.textContent);
+      link.href = `#${heading.id}`;
+      if (!children.length) return el("li", "", link);
+      const details = el("details", "", el("summary", "", link), tocList(children, folded));
+      details.dataset.id = heading.id;
+      details.open = !folded.has(heading.id);
+      return el("li", "", details);
+    }),
+  );
 }
 
 async function renderDiagrams(container) {
@@ -278,21 +321,31 @@ async function saveBox() {
   await mutate((list) => [...list, { anchor, text }]);
 }
 
-function onSelectionEnd(e) {
-  if (box.contains(e.target) || e.target === commentButton) return;
+function showSelectionButton() {
   const selection = getSelection();
-  if (selection.isCollapsed || !selection.rangeCount) return hide(commentButton);
+  if (selection.isCollapsed || !selection.rangeCount) return false;
   const range = selection.getRangeAt(0);
-  if (!docEl.contains(range.commonAncestorContainer)) return hide(commentButton);
+  if (!docEl.contains(range.commonAncestorContainer)) return false;
   const index = textIndex();
   const start = offsetOf(index, range.startContainer, range.startOffset);
   const end = offsetOf(index, range.endContainer, range.endOffset);
-  if (end <= start || !index.text.slice(start, end).trim()) return hide(commentButton);
+  if (end <= start || !index.text.slice(start, end).trim()) return false;
   selectedAnchor = { kind: "text", ...captureAnchor(index.text, start, end) };
   const rect = range.getBoundingClientRect();
   show(commentButton, rect.right + window.scrollX, rect.bottom + window.scrollY + 4);
+  return true;
 }
 
+function onSelectionEnd(e) {
+  if (box.contains(e.target) || e.target === commentButton) return;
+  if (!showSelectionButton()) hide(commentButton);
+}
+
+let selectionTimer;
+document.addEventListener("selectionchange", () => {
+  clearTimeout(selectionTimer);
+  selectionTimer = setTimeout(showSelectionButton, 250);
+});
 document.addEventListener("mouseup", (e) => setTimeout(() => onSelectionEnd(e)));
 document.addEventListener("keyup", (e) => (e.key === "Shift" || e.shiftKey) && onSelectionEnd(e));
 commentButton.addEventListener("mousedown", (e) => e.preventDefault());

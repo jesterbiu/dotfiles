@@ -1,24 +1,19 @@
-import { appendFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicJson, privateDirectory, uuidPattern } from './storage.mjs';
 import { serve } from './protocol.mjs';
+import { errorText } from '../background-task/output.mjs';
 
 export class Worker {
   constructor({ dir, socketPath, session, dispose, exit = () => {}, onFatal = error => console.error(error) }) {
-    this.dir = dir;
-    this.socketPath = socketPath;
-    this.session = session;
-    this.dispose = dispose;
-    this.exit = exit;
-    this.onFatal = onFatal;
+    Object.assign(this, { dir, socketPath, session, dispose, exit, onFatal });
     this.queue = Promise.resolve();
-    this.accepting = true;
+    this.accepting = false;
     this.requests = new Map();
-    this.order = 0;
     this.messageIds = [];
-    this.lastAssistant = null;
     this.usage = {};
-    this.state = { phase: 'starting', sessionId: session.sessionId, sessionFile: session.sessionFile, latestResult: null };
+    this.partialAnswer = '';
+    this.state = { phase: 'starting', sessionId: session.sessionId, sessionFile: session.sessionFile };
   }
 
   serial(action) {
@@ -28,29 +23,55 @@ export class Worker {
   }
 
   saveState() {
-    return atomicJson(join(this.dir, 'state.json'), { ...this.state, updatedAt: Date.now() });
+    return atomicJson(join(this.dir, 'state.json'), { ...this.state, messageIds: this.messageIds, usage: this.usage, updatedAt: Date.now() });
   }
 
-  async start(initialRequest) {
+  async start(initial) {
     await privateDirectory(this.dir);
-    await privateDirectory(join(this.dir, 'results'));
     this.unsubscribe = this.session.subscribe(event => {
       if (event.type !== 'message_end' && event.type !== 'agent_settled') return;
+      if (event.type === 'agent_settled') this.accepting = false;
       void this.serial(async () => {
         if (event.type === 'message_end' && event.message.role === 'assistant') {
           this.lastAssistant = event.message;
-          for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']) {
-            this.usage[key] = (this.usage[key] ?? 0) + (event.message.usage?.[key] ?? 0);
-          }
+          const text = event.message.content?.filter(block => block.type === 'text').map(block => block.text).join('\n');
+          if (text) this.partialAnswer = text;
+          for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']) this.usage[key] = (this.usage[key] ?? 0) + (event.message.usage?.[key] ?? 0);
           this.usage.cost = (this.usage.cost ?? 0) + (event.message.usage?.cost?.total ?? 0);
         }
         if (event.type === 'agent_settled') await this.finish();
       }).catch(error => this.fatal(error));
     });
-    this.state.phase = 'idle';
     await this.saveState();
-    if (initialRequest) await this.handle(initialRequest);
-    this.closeServer = await serve(this.socketPath, value => this.handle(value));
+    try {
+      await new Promise((resolve, reject) => {
+        let admitted = false;
+        this.session.prompt(initial.message, {
+          expandPromptTemplates: false,
+          source: 'rpc',
+          preflightResult: disposition => {
+            admitted = true;
+            this.accepting = disposition === 'started';
+            this.serial(async () => {
+              this.state.phase = 'busy';
+              await this.record(initial.messageId, initial.message, disposition);
+              if (disposition !== 'started') await this.finish('Initial task did not start');
+            }).then(resolve, reject);
+          },
+        }).catch(error => {
+          this.accepting = false;
+          if (!admitted) reject(error);
+          else void this.serial(() => this.finish(error.message)).catch(cause => this.fatal(cause));
+        });
+      });
+      if (this.accepting) {
+        this.closeServer = await serve(this.socketPath, value => this.handle(value));
+        if (!this.accepting) await this.closeServer();
+      }
+    } catch (error) {
+      this.accepting = false;
+      await this.serial(() => this.finish(error.message));
+    }
   }
 
   fatal(error) {
@@ -60,102 +81,69 @@ export class Worker {
 
   handle(value) {
     if (value?.action === 'stop') return this.stop();
-    if (value?.action !== 'send') return Promise.reject(new Error('Unknown subagent request'));
+    if (value?.action !== 'send') throw new Error('Unknown subagent request');
     return this.send(value);
   }
 
+  async record(messageId, message, disposition) {
+    const ack = { messageId, disposition };
+    if (disposition !== 'handled') this.messageIds.push(messageId);
+    await appendFile(join(this.dir, 'requests.jsonl'), `${JSON.stringify({ ...ack, message })}\n`, { mode: 0o600 });
+    await this.saveState();
+    return ack;
+  }
+
+  send({ message, messageId, mode }) {
+    if (typeof message !== 'string' || !message.trim()) throw new Error('message must not be empty');
+    if (!uuidPattern.test(messageId ?? '')) throw new Error('messageId must be a UUID');
+    if (mode !== undefined && mode !== 'steer') throw new Error('Only steering is supported');
+    const prior = this.requests.get(messageId);
+    if (prior) {
+      if (prior.message !== message) throw new Error('messageId reused with different input');
+      return prior.outcome;
+    }
+    if (!this.accepting) throw new Error('Subagent is settled or stopping');
+    const outcome = (async () => {
+      const disposition = await this.session.steer(message, undefined, { source: 'rpc' });
+      if (!this.accepting) throw new Error('Subagent settled before steering admission completed');
+      return this.serial(() => this.record(messageId, message, disposition));
+    })();
+    outcome.catch(() => {});
+    this.requests.set(messageId, { message, outcome });
+    return outcome;
+  }
+
   async stop() {
-    await this.serial(async () => {
-      this.accepting = false;
-      this.state.phase = 'stopping';
-      await this.saveState();
-    });
-    setImmediate(() => void this.session.abort().then(() => this.close()).then(() => this.exit(), error => this.fatal(error)));
+    this.accepting = false;
+    this.stopReason = 'Cancelled';
+    await this.serial(async () => { this.state.phase = 'stopping'; await this.saveState(); });
+    this.end();
     return { phase: 'stopping' };
   }
 
-  send({ message, messageId, mode = 'steer' }) {
-    if (typeof message !== 'string' || !message.trim()) throw new Error('message must not be empty');
-    if (!uuidPattern.test(messageId ?? '')) throw new Error('messageId must be a UUID');
-    if (!['steer', 'followUp'].includes(mode)) throw new Error('Invalid send mode');
-    const prior = this.requests.get(messageId);
-    if (prior) {
-      if (prior.message !== message || prior.mode !== mode) throw new Error('messageId reused with different input');
-      return prior.outcome;
-    }
-    if (!this.accepting) throw new Error('Subagent is stopping');
-    const record = { message, mode, outcome: this.admit(messageId, message, mode) };
-    record.outcome.catch(() => {});
-    this.requests.set(messageId, record);
-    return record.outcome;
-  }
-
-  async admit(messageId, message, mode) {
-    let acknowledged = false;
-    const accepted = new Promise((resolve, reject) => {
-      this.session.prompt(message, {
-        streamingBehavior: mode,
-        expandPromptTemplates: false,
-        source: 'rpc',
-        preflightResult: disposition => {
-          acknowledged = true;
-          resolve(disposition);
-        },
-      }).catch(error => {
-        if (!acknowledged) reject(error);
-        else void this.serial(() => this.finish(error.message)).catch(cause => this.fatal(cause));
-      });
-    });
-    let disposition;
-    try {
-      disposition = await accepted;
-    } catch (error) {
-      if (/compaction is in progress/.test(error.message)) {
-        this.requests.delete(messageId);
-        throw Object.assign(new Error(error.message), { delivery: 'busy' });
-      }
-      throw error;
-    }
-    try {
-      return await this.serial(async () => {
-        const ack = { messageId, order: ++this.order, disposition };
-        if (disposition !== 'handled') {
-          ack.result = (this.state.latestResult?.sequence ?? 0) + 1;
-          this.messageIds.push(messageId);
-          this.state.phase = 'busy';
-        }
-        await appendFile(join(this.dir, 'requests.jsonl'), `${JSON.stringify({ ...ack, message, mode })}\n`, { mode: 0o600 });
-        await this.saveState();
-        return ack;
-      });
-    } catch (error) {
-      this.fatal(error);
-      throw Object.assign(new Error(error.message), { delivery: 'unknown' });
-    }
+  end() {
+    if (this.ending) return;
+    this.ending = true;
+    setImmediate(() => void this.close().then(() => this.exit(), error => this.fatal(error)));
   }
 
   async finish(error) {
-    const sequence = (this.state.latestResult?.sequence ?? 0) + 1;
-    const prefix = join(this.dir, 'results', String(sequence).padStart(6, '0'));
-    const answerPath = `${prefix}.md`;
-    const resultPath = `${prefix}.json`;
+    if (this.state.result) return;
+    this.accepting = false;
     const message = this.lastAssistant;
-    const status = error || !message || !['stop'].includes(message.stopReason) ? 'failed' : 'succeeded';
-    const answer = message?.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? '';
-    const result = {
-      sequence, status, sessionId: this.session.sessionId, sessionFile: this.session.sessionFile,
-      messageIds: [...this.messageIds], answerPath, resultPath, usage: this.usage,
-      error: error ?? (status === 'failed' ? message?.errorMessage ?? `No successful final answer (${message?.stopReason ?? 'missing'})` : null),
-      endedAt: Date.now(),
-    };
-    await writeFile(answerPath, `${answer}\n`, { flag: 'wx', mode: 0o600 });
-    await atomicJson(resultPath, result);
-    this.state.latestResult = { sequence, status, answerPath, resultPath };
-    this.state.phase = this.accepting ? 'idle' : 'stopping';
-    this.messageIds = [];
-    this.lastAssistant = null;
-    this.usage = {};
+    const failure = this.stopReason ?? error ?? (message?.stopReason === 'stop' ? undefined : message?.errorMessage ?? `No successful final answer (${message?.stopReason ?? 'missing'})`);
+    const result = { status: failure ? 'failed' : 'succeeded' };
+    const answer = failure ? this.partialAnswer : message?.content?.filter(block => block.type === 'text').map(block => block.text).join('\n');
+    if (answer) result.answer = answer;
+    if (failure) {
+      result.reportedError = { source: this.stopReason ? 'worker' : 'sdk', message: errorText(failure) };
+      await atomicJson(join(this.dir, 'failure.json'), { error: failure });
+    }
+    await atomicJson(join(this.dir, 'result.json'), result);
+    this.state.result = result.status;
+    this.state.phase = 'stopping';
     await this.saveState();
+    this.end();
   }
 
   close() {
@@ -163,7 +151,8 @@ export class Worker {
     this.accepting = false;
     this.closing = (async () => {
       await this.closeServer?.();
-      await this.serial(async () => { this.state.phase = 'stopping'; await this.saveState(); });
+      await this.session.abort();
+      await this.serial(() => this.finish(this.stopReason ?? 'Worker stopped before task settlement'));
       try {
         await this.dispose();
       } finally {

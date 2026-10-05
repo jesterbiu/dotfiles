@@ -12,11 +12,11 @@ const assets = {
   "/_/anchor.js": "lib/anchor.js",
 };
 
-export async function startServer({ port = 4747 } = {}) {
+export async function startServer({ port = 4747, host = "127.0.0.1" } = {}) {
   const server = createServer((req, res) => handle(req, res).catch((err) => send(res, err.status ?? 500, err.message)));
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
+    server.listen(port, host, () => {
       server.off("error", reject);
       resolve();
     });

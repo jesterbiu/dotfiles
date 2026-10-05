@@ -74,7 +74,7 @@ test('real Pi runtime exposes no wait action, preserves abort and reload, and cl
   };
   const call = async args => (await execute(args)).details;
   const start = () => call({ action: 'start', command: 'exec sleep 60' });
-  const present = async task => (await tmux.inspect(JSON.parse(await readFile(task.metadataPath, 'utf8')).tmuxSession)) !== null;
+  const present = async task => (await tmux.inspect(JSON.parse(await readFile(join(task.artifacts, 'metadata.json'), 'utf8')).tmuxSession)) !== null;
 
   const tool = runtime.session.extensionRunner.getToolDefinition('background_task');
   assert.equal(JSON.stringify(tool.parameters).includes('wait'), false);
@@ -82,8 +82,8 @@ test('real Pi runtime exposes no wait action, preserves abort and reload, and cl
   assert.equal(failedStart.isError, true);
   assert.equal(failedStart.details.action, 'start');
   assert.ok(failedStart.details.taskId);
-  assert.equal(typeof failedStart.details.cause, 'string');
-  assert.deepEqual(failedStart.details.sideEffects, []);
+  assert.equal(typeof failedStart.details.error, 'string');
+  assert.equal(failedStart.details.sideEffects, undefined);
   assert.deepEqual(JSON.parse(failedStart.content[0].text), failedStart.details);
   const loopFailure = await agentCore.runToolCall(
     { type: 'toolCall', id: randomUUID(), name: 'background_task', arguments: { action: 'start', command: 'true', cwd: 'missing' } },
@@ -92,16 +92,16 @@ test('real Pi runtime exposes no wait action, preserves abort and reload, and cl
   assert.equal(loopFailure.isError, true);
   assert.equal(loopFailure.result.details.action, 'start');
   assert.ok(loopFailure.result.details.taskId);
-  assert.equal(typeof loopFailure.result.details.cause, 'string');
-  assert.deepEqual(loopFailure.result.details.sideEffects, []);
+  assert.equal(typeof loopFailure.result.details.error, 'string');
+  assert.equal(loopFailure.result.details.sideEffects, undefined);
   const fast = await call({ action: 'start', command: 'printf sdk-output; printf sdk-error >&2' });
   const finished = await eventually(async () => {
     const listed = await call({ action: 'list' });
-    return listed.tasks.find(task => task.taskId === fast.taskId && task.status === 'succeeded');
+    return listed.tasks.find(task => task.taskId === fast.taskId && task.process === 'succeeded');
   }, 'fast task did not finish');
-  assert.equal(finished.status, 'succeeded');
-  assert.equal(await readFile(fast.stdoutPath, 'utf8'), 'sdk-output');
-  assert.equal(await readFile(fast.stderrPath, 'utf8'), 'sdk-error');
+  assert.equal(finished.process, 'succeeded');
+  assert.equal(await readFile(join(fast.artifacts, 'stdout.log'), 'utf8'), 'sdk-output');
+  assert.equal(await readFile(join(fast.artifacts, 'stderr.log'), 'utf8'), 'sdk-error');
   await eventually(() => runtime.session.messages.some(message => message.role === 'custom' && message.customType === 'background-task'), 'completion was not delivered');
   assert.equal(runtime.session.isStreaming, false);
 
@@ -127,8 +127,8 @@ test('real Pi runtime exposes no wait action, preserves abort and reload, and cl
 
   const quitting = await start();
   const malformed = await start();
-  const malformedSession = JSON.parse(await readFile(malformed.metadataPath, 'utf8')).tmuxSession;
-  await writeFile(malformed.metadataPath, '{broken');
+  const malformedSession = JSON.parse(await readFile(join(malformed.artifacts, 'metadata.json'), 'utf8')).tmuxSession;
+  await writeFile(join(malformed.artifacts, 'metadata.json'), '{broken');
   await runtime.dispose();
   assert.equal(await present(quitting), false);
   assert.equal(await tmux.inspect(malformedSession), null);

@@ -148,4 +148,8 @@ test("server serves markdown and directory listings under home by home-relative 
   assert.deepEqual(await readdir(outsideDir), ["outside.md"]);
 
   await assert.rejects(startServer({ port: server.address().port }), { code: "EADDRINUSE" });
+  assert.equal(server.address().address, "127.0.0.1");
+  const lan = await startServer({ port: 0, host: "0.0.0.0" });
+  t.after(() => lan.server.close());
+  assert.equal(lan.server.address().address, "0.0.0.0");
 });

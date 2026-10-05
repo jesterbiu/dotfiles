@@ -72,8 +72,12 @@ export async function serve(socketPath, handle) {
     server.listen(socketPath, resolve);
   });
   await chmod(socketPath, 0o600);
-  return async () => {
-    for (const socket of connections) socket.end();
-    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  let closing;
+  return () => {
+    closing ??= (async () => {
+      for (const socket of connections) socket.end();
+      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    })();
+    return closing;
   };
 }

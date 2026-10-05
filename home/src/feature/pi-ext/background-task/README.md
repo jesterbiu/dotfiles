@@ -22,7 +22,9 @@ The default server is `pi-tasks`. Do not use a normal tmux server. The extension
 { "action": "cancelAll" }
 ```
 
-There is no `wait` action. Launch returns a task ID, metadata path, and stdout/stderr/exit paths promptly. `status` inspects one task once and returns its current state. `list` returns `{ "tasks": [...], "errors": [...] }`. An unreadable task appears in `tasks` as `{ "taskId", "metadataPath", "error" }`; `errors` holds only task discovery failures. `cancelAll` returns independent results and errors. tmux resource names are internal.
+There is no `wait` action. Launch returns promptly with `taskId`, `process`, and one `artifacts` directory, plus deadline/report settings when requested. Read `stdout.log`, `stderr.log`, `metadata.json`, and `exit` under that root. `status` inspects one task once. `list` returns `{ "tasks": [...] }`, adding `errors` only for discovery failures. Unreadable records appear in `tasks` with identity, artifact root, `process: "unknown"`, and an error. `cancelAll` returns independent results and nonempty errors. Full manager metadata stays in files; tmux resource names are internal.
+
+Process states are `running`, `succeeded`, `failed`, `cancelled`, `timed_out`, and `unknown`. Process success does not prove work correctness. Errors retain actionable identity and side effects, omit empty fields, redact selected URL/credential patterns, and cap reported text at 300 characters. This is not full artifact redaction.
 
 ## Behavior
 
@@ -39,7 +41,9 @@ Commands run through `/bin/sh -c`, with null stdin and separate plain stdout/std
 
 Natural completion is recorded before pane removal. A failed terminal write retains the dead pane, including during owner cleanup. Errors identify the action, task, cause, and completed side effects. Cleanup on controlled quit is silent: its errors are not shown.
 
-Completion and status notices use `triggerTurn: false`. Pi defers notices until the current turn ends and appends idle notices without a model call. Notices are best effort and do not replay.
+Observed completion sends an automatic notice; routine polling is unnecessary. Completion and status notices use `triggerTurn: false`, with the same compact task shape and a `type` field. Pi defers notices until the current turn ends and appends idle notices without a model call. Notices are best effort and do not replay; use status/list to reconcile missed notices.
+
+`notificationTarget: "subagent"` is reserved for delegated workers. Their events route to the subagent extension instead of producing duplicate background-task notices. Subagent termination can wake the parent; standalone background-task notices remain non-waking. Background-task still owns process observation and cleanup. Omit this field for standalone commands. `timeoutSeconds` is total task lifetime; reports describe process state, not model callbacks.
 
 `/new`, resume, fork, and controlled quit reject new launches and attempt owner cleanup. Turn abort and reload preserve tasks. Interactive double Ctrl+C within 500 ms follows controlled runtime disposal; a single Ctrl+C clears the editor. The SDK test does not simulate raw TUI keys. SDK hosts need `AgentSessionRuntime.dispose()` for quit cleanup; plain `AgentSession.dispose()` does not emit `session_shutdown`.
 

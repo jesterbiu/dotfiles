@@ -66,8 +66,8 @@ When asked to address comments on `<doc>.md`, read `<doc>.md.comments.json`. For
 
 Decided 2026-10-03.
 
-- The tool is a self-contained skill directory at `~/.agent/skills/mdreview`: `SKILL.md` at the root, code in `bin/`, `lib/`, `public/`, this `docs/`. Agents that read skills get a symlink: `~/.claude/skills/mdreview`, later `~/.codex/skills/mdreview`.
-- One long-lived server, `mdreview serve [--port 4747]`, run as a systemd user service. A doc is viewed at `http://localhost:4747/<path relative to home>`, so `~/src/x/design.md` is `http://localhost:4747/src/x/design.md`. The server joins the path onto the real path of home and refuses anything resolving outside it. Reads are limited to markdown under the home directory. The only write is `<doc>.comments.json` next to a served doc. Page assets and the API live under a reserved prefix.
+- The tool is a self-contained skill directory at `~/.agents/skills/mdreview`: `SKILL.md` at the root, code in `bin/`, `lib/`, `public/`, this `docs/`. Agents that read skills get a symlink: `~/.claude/skills/mdreview`, later `~/.codex/skills/mdreview`.
+- One long-lived server, `mdreview serve [--port 4747]`, run as a systemd user service. It binds 127.0.0.1 by default; `--host 0.0.0.0` opens it to the LAN for review on a phone, without authentication. A doc is viewed at `http://localhost:4747/<path relative to home>`, so `~/src/x/design.md` is `http://localhost:4747/src/x/design.md`. The server joins the path onto the real path of home and refuses anything resolving outside it. Reads are limited to markdown under the home directory. The only write is `<doc>.comments.json` next to a served doc. Page assets and the API live under a reserved prefix.
 - Agents never talk to the server. They write the doc, print its URL, and use the CLI for comments:
   - `mdreview comments <doc.md>` prints open comments with the source line each anchors to. Anchors are rendered text, so the CLI does the markdown-aware matching once instead of every agent doing it.
   - `mdreview resolve <doc.md> <id>...` sets status to resolved and nothing else.

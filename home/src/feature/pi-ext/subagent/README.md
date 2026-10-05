@@ -1,10 +1,10 @@
-# Persistent Pi subagents
+# One-task Pi subagents
 
 Local extension built on `../background-task/`. Requires Node.js, POSIX Unix sockets, tmux, and the Node-based Pi package.
 
 ## Load
 
-Both extensions must be active. Load them explicitly from the repository root:
+Load both extensions from the repository root:
 
 ```bash
 pi --no-extensions \
@@ -19,80 +19,107 @@ Or add both directories to `packages` in Pi settings:
 { "packages": ["<path>/pi-ext/background-task", "<path>/pi-ext/subagent"] }
 ```
 
-Relative package paths resolve from the settings file directory. Each `package.json` declares `pi.extensions`.
+Relative package paths resolve from the settings file directory. Use a dedicated tmux server. Keep `background_task` active and callable. Subagent invokes it through Pi's nested tool API; subagent itself is model-only, not callable through codemode or other tools.
 
-Use a dedicated tmux server, not your normal interactive server. Keep `background_task` active and callable. The subagent tool invokes it through Pi's nested tool API; it does not create another task manager. `send` checks the child's process state with the `status` action of that tool. Subagent is model-only, not callable through codemode or other tools.
-
-Starting a child makes model requests and can incur usage costs. Loading the extension alone does not start children.
+Starting a worker can incur model usage costs. Loading the extension does not start workers.
 
 ## Tool API
 
+### Model discovery
+
+Call the read-only `model_list` tool with `{ "query": "astra" }` to search without knowing the provider, or `{}` to list models available in the parent `/model` all scope. Query uses a case-insensitive substring match on provider, model ID, and display name. It returns `{ "models": ["provider/model-id", "..."] }` sorted by exact ID. All matches are returned; select an exact ID for `subagent.start.model`.
+
+Discovery awaits `ctx.modelRegistry.refresh()` with a 15-second timeout, then uses `ctx.modelRegistry.getAvailable()`. This matches the available chat-model snapshot used by `/model` in its all scope, including Pi's provider authentication and model filters. Scoped cycling preferences do not restrict discovery. Refresh can fall back to cached models, as the selector does. There is no separate worker catalog. A listed model is not guaranteed to start in the worker; worker startup remains authoritative. There are no aliases, fuzzy launch resolution, or provider-filter input.
+
+`model_list` is directly available and callable while active. It declares an output schema and returns structured data, so codemode can use `const { models } = await tools.model_list({ query: "astra" });`.
+
+### Delegation
+
 ```json
-{ "action": "start", "task": "Inspect the parser and report gaps. Do not edit files.", "timeoutSeconds": 600 }
+{ "action": "start", "task": "Inspect the parser. Do not edit files.", "model": "provider/model-id", "timeoutSeconds": 600 }
 { "action": "send", "taskId": "...", "message": "Focus on malformed input." }
-{ "action": "send", "taskId": "...", "message": "Now review the tests.", "mode": "followUp" }
 { "action": "list" }
 { "action": "cancel", "taskId": "..." }
 { "action": "cancelAll" }
 ```
 
-`start` accepts optional `cwd`, exact `model: "provider/model-id"`, `timeoutSeconds`, and `statusReport: { afterSeconds, repeat? }`. The model and thinking level otherwise come from the parent at launch. Pi can clamp the thinking level for the selected model; `resolved.json` records the actual selection.
+`start` requires an exact `model: "provider/model-id"`. Optional inputs are `topic`, `cwd`, `thinkingLevel`, `timeoutSeconds`, and `statusReport: { afterSeconds, repeat? }`. `topic` is a short label for the footer; task text is used when it is absent. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Omission inherits the launching parent's current thinking level. Pi may clamp it for the selected model; `resolved.json` records the effective selection.
 
-Start returns the background task ID and artifact paths before child initialization finishes. The initial task is admitted before the socket accepts follow-up messages.
+Start returns promptly with `taskId`, `process`, `phase`, and one `artifacts` directory. Requested deadline/report settings are also returned. It does not wait for child initialization. Read `result.json` under `artifacts` for the answer. There is no wait action.
 
-There is no wait action. Read result files with normal file tools.
+Each worker handles one task. There is no idle follow-up, numbered result, fork, or resume parameter. Independent work needs a fresh start with explicit context. Forking prior conversation context is selected for future continuation but deferred.
 
-### Sending messages
+### Steering
 
-- Busy + `steer` (default): queue guidance at a steering boundary, after active tools finish.
-- Busy + `followUp`: queue work after the current run's tool and steering work.
-- Idle: either mode starts another run in the same conversation.
-- Stopping or terminated: reject new messages.
+`send` queues guidance only while the worker accepts input. It uses Pi's steering boundary after the active turn and tools. It cannot interrupt a tool or undo edits. The initial task is admitted before the control socket opens; an early send can fail with `delivery: "not_sent"`.
 
-Steering does not interrupt a tool, undo an edit, or prove compliance.
+The acknowledgement contains `taskId`, `messageId`, and Pi's `queued` or `handled` disposition. Admission is not completion. Several guidance messages can contribute to one result. Settlement closes admission synchronously; late guidance cannot start another run.
 
-An acknowledgement is Pi's admission decision for the message, and nothing else. It contains `messageId`, admission `order`, a disposition, and for `started` or `queued` the number of the result the message lands in:
-
-| Disposition | Meaning | `result` |
-|---|---|---|
-| `started` | Pi was idle; a new run began | The next result number |
-| `queued` | Pi was busy; the message joins the current run | The pending result number |
-| `handled` | Pi consumed the input without a run | Absent |
-
-Acknowledgements are not completed answers. Every settled run produces one numbered result, listing the messages that contributed. A run with no tracked message still produces a result with an empty list.
-
-A failed send reports `delivery`:
+Failed socket requests report delivery:
 
 | Value | Meaning |
 |---|---|
-| `not_sent` | No request reached the worker. The socket was not ready or not reachable. Retry is safe. |
-| `rejected` | The worker refused the request, for example while stopping or on a `messageId` reuse with different input. |
-| `busy` | Pi is compacting the conversation. Retry with the same `messageId` and input. |
-| `unknown` | The request was submitted but no acknowledgement arrived in time. The worker may have accepted it. |
+| `not_sent` | No request was submitted. The socket may not be ready or reachable. |
+| `rejected` | The worker refused the request. |
+| `unknown` | Submitted, but no acknowledgement arrived. The worker may have accepted it. |
 
-The client waits 5 seconds for an acknowledgement. The worker closes an idle connection after 10 seconds. A slow admission can produce `unknown` on the client while the worker still admits the message.
+The client timeout is 5 seconds; the server's idle-connection timeout is 10 seconds. An optional UUID `messageId` provides duplicate detection for one worker lifetime. After unknown delivery, reuse the same ID and identical text. Never replay to a new worker. There is no automatic replay or restart.
 
-An optional UUID `messageId` provides duplicate detection while the worker lives. Reuse the same ID and identical message/mode after `delivery: "unknown"` or `"busy"`; the request may already have been accepted. A new ID creates new work. There is no automatic restart or replay.
+Accepted operations are not tied to the parent turn's abort signal.
 
-Accepted operations are not tied to the parent turn's abort signal. A turn abort does not withdraw an accepted message or stop the worker.
-
-## Lifecycle
+## Lifecycle and notices
 
 ```text
-Parent tool ── background_task ── tmux ── worker ── Pi SDK session
-     └──────── private Unix socket ────────┘
-
-starting → idle ⇄ busy → stopping → terminated
-                    └─ settled → numbered result + result-ready notice
+start → initialize → busy ← steering
+                      ↓ agent_settled
+                 close admission
+                      ↓
+                 result.json
+                      ↓
+                 dispose → exit
+                      ↓
+background process observer → one subagent completion notice
 ```
 
-An idle child still has a running background task. Agent errors produce failed results but leave the conversation available for follow-up. Initialization failure terminates the worker. Process status and result status are separate; neither proves the delegated work is correct.
+Keep three meanings separate:
 
-Children stay alive until cancellation, total lifetime timeout, or owner cleanup. `timeoutSeconds` is not a per-message timeout. Turn abort and extension reload preserve children. Session replacement and controlled exit use background-task cleanup.
+| Field | Meaning |
+|---|---|
+| `process` | Background process state: `running`, `succeeded`, `failed`, `cancelled`, `timed_out`, or `unknown` |
+| `phase` | Conversation state: `starting`, `busy`, `stopping`, `terminated`, or `unknown` |
+| `result` | Observed result status: `succeeded`, `failed`, `unavailable`, or `unknown` for unreadable output |
 
-Cancellation first sends stop over the socket, then invokes background-task cancellation. On stop the worker closes admission, aborts the current run, writes its final result, and exits on its own; `stopping` lasts as long as the abort. Background-task cancellation is the backstop for a worker that does not exit. Descendant termination remains best effort.
+A clean process exit does not establish task success. Successful task status does not prove the delegated work is correct. Failure does not prove that no edits occurred. A hard kill can leave no result. Cancellation first sends stop, then uses background-task cancellation as a backstop. A worker may still finalize output after pane removal; notices report the evidence available when observed, and later list/file reads can reconcile it.
 
-`list` and `cancelAll` include only the current parent session's subagents, not unrelated shell tasks. Result-ready notices use filesystem events and `triggerTurn: false`; they neither poll tmux nor start a model turn. A launch's watcher ends when its state reads `terminated`, and terminated launches are not watched after reload. Notices are best effort, can coalesce, and do not replay on reload. List and persisted result files remain available.
+Only subagent notices reach the parent for subagent-owned tasks. They combine process evidence with the persisted result and contain no answer text. Failed notices include bounded, sanitized reported errors, not a diagnosis. Standalone background tasks retain their own notices.
+
+A termination notice wakes an idle parent or queues follow-up work when the parent is busy (`triggerTurn: true`, `deliverAs: 'followUp'`). This can incur parent model usage. Scheduled status notices do not wake the parent. Delivery remains best effort with no replay after reload. Routine polling is unnecessary. Use `list` after interruption or a missed notice; persisted output remains available. Controlled owner cleanup remains silent.
+
+`timeoutSeconds` limits total worker lifetime. Deadlines and status reports require an active parent observer. Turn abort and reload preserve workers. Session replacement and controlled exit cancel them through background-task. List and cancellation affect only this session's subagents, not unrelated shell tasks.
+
+## Footer and transcript UI
+
+The separate [statusline extension](../statusline/README.md) owns the footer. Load it explicitly to show one foreground-styled main line and at most three subagent rows. Subagent itself does not install a footer:
+
+```text
+workspace                            context usage  model · thinking
+↳ first topic   2m10s model · high
+↳ second topic  45s   model · medium
+third topic 30s | fourth topic 12s | ...
+```
+
+With three or fewer agents, each row includes topic, model, thinking level, and elapsed time. With more than three, the first two retain full rows and the third combines topics and elapsed times for the remaining agents. Rows truncate with `...` to fit terminal display width. The main line uses foreground-only theme colors for each item and no background bar. Full rows have a dim `↳` prefix, normal-weight body-text topics capped at 30 columns, and shared left-aligned topic and elapsed columns. The final `model · thinking` field is combined, with no padding inside it. Models use warning bold; thinking uses warning without italic. Separators are dim. There is no status column or line-end fill.
+
+Rows disappear immediately on observed termination, with no completed-row retention. Outcomes remain in notices and result artifacts. Reload restores active agents without replaying old completion notices or re-showing finished rows. Timer updates repaint the display, not poll processes.
+
+Subagent tool cards and completion/status notices are hidden from the transcript UI by default. Their content still reaches the model and remains available in the transcript and artifacts. To show or hide detail for debugging:
+
+```text
+/subagent-ui on
+/subagent-ui off
+```
+
+The switch is runtime-only, works without statusline, and does not change parent wake behavior. `/statusline on|off` independently controls the footer. Notice visibility is set when the notice is sent; switching on does not reveal earlier hidden notices. Model discovery and standalone background-task cards/notices remain visible.
 
 ## Artifacts
 
@@ -100,31 +127,44 @@ Stored under `<agent-dir>/subagents/<owner-hash>/<launch-id>/`:
 
 | File | Content |
 |---|---|
-| `manifest.json` | Task, parent owner, requested model, cwd, SDK path, socket location |
-| `binding.json` | Background task ID and process artifact paths |
-| `resolved.json` | Child session identity, effective tools/model/thinking level |
-| `state.json` | Last persisted conversation phase and latest result pointer |
-| `requests.jsonl` | Accepted messages and acknowledgements |
-| `sessions/` | Persistent Pi conversation |
-| `results/000001.md` | Final assistant text for one settled run |
-| `results/000001.json` | Result status, request IDs, usage, and answer path |
-| `launch-error.json`, `startup-error.json` | Launch or initialization failure, when present |
+| `manifest.json` | Version 2 launch input, owner, topic/start time, model/thinking selection, cwd, SDK and socket paths |
+| `binding.json` | Background task ID and process artifact root |
+| `resolved.json` | Effective model, thinking level, tools, and child session identity; written before prompting |
+| `state.json` | Conversation phase, message IDs, accumulated assistant usage, and result status |
+| `requests.jsonl` | Admitted messages and acknowledgements |
+| `sessions/` | Pi transcript |
+| `result.json` | One immutable worker-written result |
+| `failure.json` | Raw run failure detail, when present |
+| `launch-error.json`, `startup-error.json` | Launch or initialization diagnostics, when present |
 
-The worker publishes result metadata before updating the state pointer. Prior results are not overwritten. Assistant-message usage is recorded per result, including intermediate responses. Compaction and the full transcript are in the Pi session file under `sessions/`. The child runs in a separate process, so its usage is not added to the parent's Pi totals.
+Successful result:
 
-Background-task retains its own metadata and stdout/stderr. Its process status overrides stale conversation state after termination. Unknown process outcomes remain unknown, not success. A hard kill can leave incomplete files without a final result.
+```json
+{ "status": "succeeded", "answer": "Reviewed the parser." }
+```
 
-## Configuration and limits
+Failed result with available partial text:
 
-- Fresh conversation: no parent transcript copy. Supply the required context in the task or messages.
-- Child tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`.
-- System prompt: Pi's default system prompt, plus a fixed delegate instruction, plus applicable `AGENTS.md` context files. `.pi/SYSTEM.md`, user/project extensions, skills, prompt templates, themes, and project settings do not load. Parent permission hooks and runtime-only provider registrations are not inherited.
-- Credentials and provider definitions come from the agent directory and the worker environment. Credentials are not copied into launch manifests. The shared tmux environment can predate the parent; prefer saved credentials over assuming new environment variables propagate. SDK hosts must keep `PI_CODING_AGENT_DIR` consistent with their agent directory.
-- Conversations and private sockets are not sandboxes. Children have the same OS permissions and can use bash. The parent must coordinate writes. No automatic worktrees, merge, rollback, or file locking.
-- Private Unix sockets use temporary directories to avoid long artifact paths. Graceful worker shutdown removes them; failed launches and hard kills can leave them behind. The socket location is in the manifest.
-- A parent failure between background launch and binding can leave an unbound task. The worker waits at most 30 seconds for its binding before failing, without making model requests. Background-task remains its lifecycle owner.
-- No idle timeout, automatic restart, cross-process controller lock, log rotation, redaction, or artifact deletion. Logs and transcripts can contain sensitive content. One controller per parent owner is supported.
-- Requests and responses are limited to 1 MiB. Result files have no size limit. Delegated text is literal input, not a slash command.
+```json
+{ "status": "failed", "answer": "Partial findings", "reportedError": { "source": "sdk", "message": "fetch failed" } }
+```
+
+The worker serializes the envelope; the model supplies answer text. No model-output schema is enforced. Result publication uses temporary-file rename. There is no power-loss durability guarantee. Compaction and the full transcript remain in the Pi session file. Child usage is separate from parent totals.
+
+Background-task keeps its own `metadata.json`, `stdout.log`, and `stderr.log`; find its artifact root in `binding.json` or background-task status. Returns omit empty error collections and detailed metadata. Errors retain identity, delivery uncertainty, and recovery locators where available.
+
+## Limits
+
+- Unreadable ownership/binding records block launch and require inspection.
+- Children start fresh, with no parent transcript copy. Supply context in the task or files.
+- Tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. System prompt: Pi defaults, a fixed delegate instruction, and applicable `AGENTS.md` files. No `.pi/SYSTEM.md`, user/project extensions, skills, prompt templates, themes, or project settings. Parent permission hooks and runtime-only providers are not inherited.
+- Before SDK services, read agent-directory `httpProxy` and initialize Pi's HTTP dispatcher. Existing proxy environment variables retain Pi CLI precedence. Project proxy settings are ignored; proxy URLs are not copied into launch artifacts.
+- Credentials and provider definitions come from the agent directory and worker environment. The shared tmux environment can predate the parent. SDK hosts must keep `PI_CODING_AGENT_DIR` consistent with their agent directory.
+- This is not a sandbox. Children share OS permissions and workspace access. Assign non-overlapping write scopes. No automatic worktrees, merge, rollback, or file locking.
+- Private sockets use temporary directories to avoid long paths. Graceful exit removes them; failed launches and hard kills can leave them behind. The manifest identifies them.
+- The worker waits at most 30 seconds for a durable task binding before failing without model requests. A parent failure during launch can leave an unbound task; inspect both artifact roots rather than restarting blindly.
+- One controller per parent owner. No cross-process lock, automatic restart, artifact deletion, log cap, or full diagnostic redaction. Reported errors redact selected URL/credential patterns and cap text at 300 characters; artifacts can contain secrets.
+- Socket frames are limited to 1 MiB. Results have no size limit.
 
 ## Tests
 
@@ -134,6 +174,4 @@ npm test
 PI_PACKAGE_DIR=/path/to/node_modules/@earendil-works/pi-coding-agent npm run test:pi
 ```
 
-Unit tests use fake sessions and background-tool outcomes. SDK tests use a stub stream and a loopback-only test provider, isolated agent directories, and a unique tmux server. They make no paid model requests.
-
-See `design.md` for accepted design decisions, recommendations, and open questions.
+Tests use fake sessions, isolated agent directories, local providers, and a unique tmux server. The hard-kill integration case uses Linux `/proc`. No paid model requests. See `design.md` for architecture.

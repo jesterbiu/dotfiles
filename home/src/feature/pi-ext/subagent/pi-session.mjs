@@ -4,6 +4,11 @@ import { pathToFileURL } from 'node:url';
 export async function createPiRuntime(manifest) {
   const sdk = await import(pathToFileURL(manifest.sdkPath).href);
   const { cwd, agentDir, dir } = manifest;
+  const settings = sdk.SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+  if (settings.drainErrors().length) throw new Error('Cannot read subagent network settings from the agent directory');
+  const http = await import(new URL('./core/http-dispatcher.js', pathToFileURL(manifest.sdkPath)).href);
+  http.applyHttpProxySettings(settings.getGlobalSettings().httpProxy);
+  http.configureHttpDispatcher();
   const create = async ({ sessionManager, sessionStartEvent }) => {
     const services = await sdk.createAgentSessionServices({
       cwd,

@@ -1,6 +1,6 @@
 ---
 name: mdreview
-description: Use when writing or updating a markdown design doc, or when asked to address review comments on a markdown doc.
+description: Use when user explicitly requests or when asked to address review comments on a markdown doc.
 ---
 
 # mdreview

@@ -12,21 +12,22 @@ covered() {
   return 1
 }
 
-errors=()
-for p in "${paths[@]}"; do
-  [ -e "$HOME/$p" ] || errors+=("missing in \$HOME: $p")
-done
-
 pi_settings=$HOME/.pi/agent/settings.json
 if [ -f "$pi_settings" ]; then
   while IFS= read -r entry; do
     [[ $entry =~ ^[a-z]+: ]] && continue
     [[ $entry == /* ]] || entry=$HOME/.pi/agent/$entry
     resolved=$(realpath -m "$entry")
+    [[ $resolved == */index.ts ]] && resolved=$(dirname "$resolved")
     rel=${resolved#"$HOME"/}
-    covered "$rel" || errors+=("Pi local path not in manifest: $rel")
+    covered "$rel" || paths+=("$rel")
   done < <(jq -r '(.packages // [], .extensions // [])[] | if type == "object" then .source else . end' "$pi_settings")
 fi
+
+errors=()
+for p in "${paths[@]}"; do
+  [ -e "$HOME/$p" ] || errors+=("missing in \$HOME: $p")
+done
 
 if [ ${#errors[@]} -gt 0 ]; then
   printf '%s\n' "${errors[@]}" >&2

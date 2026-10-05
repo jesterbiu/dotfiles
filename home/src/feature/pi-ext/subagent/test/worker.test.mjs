@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -8,37 +8,29 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Worker } from '../worker.mjs';
 import { request } from '../protocol.mjs';
 
-export class FakeSession {
+class FakeSession {
   sessionId = randomUUID();
   sessionFile = '/fake/session.jsonl';
   calls = [];
   listeners = new Set();
   active = false;
-  deferred = new Set();
-  compacting = new Set();
   subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   emit(event) { for (const listener of this.listeners) listener(event); }
   async abort() { if (this.active) this.settle(); }
   async prompt(message, options) {
     if (message === 'reject') throw new Error('No credentials');
-    if (message.startsWith('deferred') && !this.deferred.has(message)) {
-      this.deferred.add(message);
-      setTimeout(() => void this.prompt(message, options), 20);
-      return;
-    }
-    if (message === 'compacting' && !this.compacting.has(message)) {
-      this.compacting.add(message);
-      throw new Error('Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.');
-    }
-    const disposition = this.active ? 'queued' : message === 'handled' ? 'handled' : 'started';
-    this.calls.push({ message, mode: options.streamingBehavior, disposition });
-    if (disposition !== 'handled') this.active = true;
-    options.preflightResult(disposition);
-    if (disposition !== 'started') return;
+    this.calls.push(message);
+    this.active = true;
+    options.preflightResult('started');
     await new Promise(resolve => { this.resolve = resolve; });
   }
+  async steer(message) {
+    if (message === 'racing') { this.settle(); await delay(5); }
+    this.calls.push(message);
+    return 'queued';
+  }
   finish(text, stopReason = 'stop') {
-    this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], stopReason, usage: { input: 2, output: 3 }, errorMessage: stopReason === 'error' ? 'Provider failed' : undefined } });
+    this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], stopReason, usage: { input: 2, output: 3 }, errorMessage: stopReason === 'error' ? 'fetch failed https://user:secret@host/token?key=secret' : undefined } });
     this.emit({ type: 'agent_end', messages: [] });
   }
   settle() {
@@ -48,7 +40,7 @@ export class FakeSession {
   }
 }
 
-export async function eventually(action) {
+async function eventually(action) {
   for (let i = 0; i < 150; i++) {
     const value = await action();
     if (value) return value;
@@ -57,124 +49,80 @@ export async function eventually(action) {
   assert.fail('Condition did not become true');
 }
 
-async function fixture(t) {
+async function fixture(t, initial = 'Investigate') {
   const dir = await mkdtemp(join(tmpdir(), 'pi-sa-test-'));
   const session = new FakeSession();
   let disposed = 0;
   let exits = 0;
   const worker = new Worker({ dir, socketPath: join(dir, 'control.sock'), session, dispose: async () => { disposed++; }, exit: () => { exits++; } });
-  await worker.start();
   t.after(async () => { await worker.close(); await rm(dir, { recursive: true, force: true }); });
-  const send = (message, mode = 'steer', messageId = randomUUID()) => request(worker.socketPath, { action: 'send', message, mode, messageId });
+  await worker.start({ action: 'send', message: initial, messageId: randomUUID() });
+  const send = (message, messageId = randomUUID(), extra = {}) => request(worker.socketPath, { action: 'send', message, messageId, ...extra });
   const state = async () => JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
-  const result = async sequence => JSON.parse(await readFile(join(dir, 'results', `${String(sequence).padStart(6, '0')}.json`), 'utf8'));
+  const result = async () => JSON.parse(await readFile(join(dir, 'result.json'), 'utf8'));
   return { worker, dir, session, send, state, result, disposed: () => disposed, exits: () => exits };
 }
 
-test('persistent conversation accepts steering and follow-up, saves settled results, and reconnects', async t => {
-  const { worker, dir, session, send, state, result: read, disposed } = await fixture(t);
+test('one task accepts steering, publishes one structured answer, and exits without admitting new work', async t => {
+  const { worker, dir, session, send, state, result, disposed, exits } = await fixture(t);
   assert.equal((await stat(worker.socketPath)).mode & 0o777, 0o600);
-  const initial = await send('Investigate');
-  assert.equal(initial.disposition, 'started');
-  assert.equal(initial.result, 1);
   const id = randomUUID();
-  const steering = await send('Focus on tests\u2028not UI', 'steer', id);
-  assert.equal(steering.disposition, 'queued');
-  assert.equal(steering.result, 1);
-  assert.deepEqual(await send('Focus on tests\u2028not UI', 'steer', id), steering);
-  await assert.rejects(send('Different text', 'steer', id), /reused/);
-  assert.equal((await send('Then check errors', 'followUp')).disposition, 'queued');
-  assert.equal(session.calls.length, 3);
-  session.finish('Intermediate answer');
-  await delay(30);
-  assert.equal((await state()).latestResult, null);
+  const ack = await send('Focus on tests\u2028not UI', id);
+  assert.deepEqual(ack, { messageId: id, disposition: 'queued' });
+  assert.deepEqual(await send('Focus on tests\u2028not UI', id), ack);
+  await assert.rejects(send('Different', id), /reused/);
+  await assert.rejects(send('Follow up', randomUUID(), { mode: 'followUp' }), /steer|mode/);
+  assert.equal(session.calls.length, 2);
+  session.finish('Intermediate');
+  await delay(20);
+  await assert.rejects(result(), { code: 'ENOENT' });
   session.finish('Final answer');
   session.settle();
-  const settled = await eventually(async () => { const s = await state(); return s.latestResult && s; });
-  assert.equal(settled.phase, 'idle');
-  assert.equal(settled.sessionId, session.sessionId);
-  const result = JSON.parse(await readFile(settled.latestResult.resultPath, 'utf8'));
-  assert.equal(result.status, 'succeeded');
-  assert.equal(result.messageIds.length, 3);
-  assert.equal(await readFile(result.answerPath, 'utf8'), 'Final answer\n');
-  assert.equal(result.usage.input, 4);
-  const more = await send('More work', 'followUp');
-  assert.equal(more.disposition, 'started');
-  assert.equal(more.result, 2);
-  session.finish('Second answer');
+  await assert.rejects(Promise.resolve().then(() => worker.send({ message: 'Late', messageId: randomUUID() })), /settled|stopping/);
+  await eventually(async () => (await state()).phase === 'terminated' && exits() === 1);
+  assert.deepEqual(await result(), { status: 'succeeded', answer: 'Final answer' });
+  assert.equal((await state()).usage.input, 4);
+  assert.equal((await state()).messageIds.length, 2);
+  assert.equal((await stat(join(dir, 'result.json'))).mode & 0o777, 0o600);
+  assert.equal((await readdir(dir)).includes('results'), false);
+  assert.equal((await readdir(dir)).includes('events.jsonl'), false);
   session.settle();
-  const second = await eventually(async () => { const s = await state(); return s.latestResult?.sequence === 2 && s; });
-  assert.equal(second.sessionId, settled.sessionId);
-  assert.equal((await read(2)).usage.input, 2);
-  assert.equal(await readFile(result.answerPath, 'utf8'), 'Final answer\n');
-  const deferredId = randomUUID();
-  const [deferred] = await Promise.all([send('deferred work', 'steer', deferredId), (async () => { await delay(5); session.settle(); })()]);
-  assert.equal(deferred.disposition, 'started');
-  assert.equal(deferred.result, 4);
-  assert.deepEqual((await read(3)).messageIds, []);
-  session.finish('Deferred answer');
-  session.settle();
-  const fourth = await eventually(async () => { const s = await state(); return s.latestResult?.sequence === 4 && s; });
-  assert.deepEqual((await read(4)).messageIds, [deferredId]);
-  assert.equal(await readFile(fourth.latestResult.answerPath, 'utf8'), 'Deferred answer\n');
-  await assert.rejects(readFile(join(dir, 'events.jsonl')), { code: 'ENOENT' });
   await worker.close();
-  await worker.close();
+  assert.deepEqual(await result(), { status: 'succeeded', answer: 'Final answer' });
   assert.equal(disposed(), 1);
-  assert.equal((await state()).phase, 'terminated');
   await assert.rejects(send('Too late'), error => error.delivery === 'not_sent');
 });
 
-test('rejection, handled input, and agent errors do not create false success or reuse an old answer', async t => {
-  const { session, send, state, result: read } = await fixture(t);
-  await assert.rejects(send('reject'), /No credentials/);
-  const compactingId = randomUUID();
-  await assert.rejects(send('compacting', 'steer', compactingId), error => error.delivery === 'busy');
-  const retried = await send('compacting', 'steer', compactingId);
-  assert.equal(retried.disposition, 'started');
-  assert.equal(retried.result, 1);
-  session.settle();
-  const compacted = await eventually(async () => { const s = await state(); return s.latestResult?.sequence === 1 && s; });
-  assert.deepEqual((await read(1)).messageIds, [compactingId]);
-  assert.equal(compacted.phase, 'idle');
-  const handled = await send('handled');
-  assert.equal(handled.disposition, 'handled');
-  assert.equal(handled.result, undefined);
-  assert.equal((await state()).phase, 'idle');
-  session.settle();
-  const untracked = await eventually(async () => { const s = await state(); return s.latestResult?.sequence === 2 && s; });
-  assert.deepEqual((await read(2)).messageIds, []);
-  assert.equal((await read(2)).status, 'failed');
-  assert.equal(untracked.phase, 'idle');
-  await send('First');
-  session.finish('Partial', 'error');
-  session.settle();
-  const failed = await eventually(async () => { const s = await state(); return s.latestResult?.sequence === 3 && s; });
-  const result = JSON.parse(await readFile(failed.latestResult.resultPath, 'utf8'));
+test('failure retains partial answer and sanitized evidence; initial rejection still produces a result', async t => {
+  const first = await fixture(t);
+  first.session.finish('Useful partial answer');
+  first.session.finish('', 'error');
+  first.session.settle();
+  await eventually(async () => (await first.state()).phase === 'terminated');
+  const result = await first.result();
   assert.equal(result.status, 'failed');
-  assert.equal(result.error, 'Provider failed');
-  await send('Second');
-  session.settle();
-  const missing = await eventually(async () => { const s = await state(); return s.latestResult?.sequence === 4 && s; });
-  assert.equal(JSON.parse(await readFile(missing.latestResult.resultPath, 'utf8')).status, 'failed');
+  assert.equal(result.answer, 'Useful partial answer');
+  assert.equal(result.reportedError.source, 'sdk');
+  assert.match(result.reportedError.message, /fetch failed/);
+  assert.equal(JSON.stringify(result).includes('secret'), false);
+  const rejected = await fixture(t, 'reject');
+  await eventually(async () => (await rejected.state()).phase === 'terminated');
+  assert.equal((await rejected.result()).status, 'failed');
+  assert.match((await rejected.result()).reportedError.message, /No credentials/);
+  assert.equal((await rejected.result()).answer, undefined);
 });
 
-test('requests are ordered and validated, and stop aborts the run, writes the final result, and exits', async t => {
-  const { worker, session, send, state, result: read, disposed, exits } = await fixture(t);
-  const responses = await Promise.all([send('One'), send('Two'), send('Three', 'followUp')]);
-  assert.deepEqual(responses.map(r => r.order).sort(), [1, 2, 3]);
-  assert.equal(responses.filter(r => r.disposition === 'started').length, 1);
-  assert.deepEqual(responses.map(r => r.result), [1, 1, 1]);
-  await assert.rejects(send('Invalid', 'other'), /mode/);
-  await assert.rejects(send(''), /message/);
-  assert.equal(session.calls.length, 3);
-  session.finish('Partial answer');
-  assert.deepEqual(await request(worker.socketPath, { action: 'stop' }), { phase: 'stopping' });
-  await assert.rejects(send('After stop'), /stopping|connect|closed|ENOENT/);
-  const final = await eventually(async () => { const s = await state(); return s.phase === 'terminated' && s; });
-  assert.equal(final.latestResult.sequence, 1);
-  assert.equal((await read(1)).messageIds.length, 3);
-  assert.equal(await readFile(final.latestResult.answerPath, 'utf8'), 'Partial answer\n');
-  assert.equal(disposed(), 1);
-  assert.equal(exits(), 1);
+test('stop preserves partial output as failure; racing steering cannot start another prompt', async t => {
+  const stopped = await fixture(t);
+  stopped.session.finish('Partial answer');
+  assert.deepEqual(await request(stopped.worker.socketPath, { action: 'stop' }), { phase: 'stopping' });
+  await eventually(async () => (await stopped.state()).phase === 'terminated' && stopped.exits() === 1);
+  assert.equal((await stopped.result()).status, 'failed');
+  assert.equal((await stopped.result()).answer, 'Partial answer');
+  assert.equal(stopped.disposed(), 1);
+  const racing = await fixture(t);
+  await assert.rejects(racing.send('racing'), /settled|stopping|closed/);
+  await eventually(async () => (await racing.state()).phase === 'terminated');
+  assert.deepEqual(racing.session.calls, ['Investigate', 'racing']);
+  assert.equal((await racing.result()).status, 'failed');
 });

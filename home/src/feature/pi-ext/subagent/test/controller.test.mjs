@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import { Controller } from '../controller.mjs';
 import { atomicJson } from '../storage.mjs';
 import { serve, request } from '../protocol.mjs';
@@ -17,21 +16,22 @@ async function fixture(t) {
     calls.push(args);
     let details;
     if (args.action === 'start') {
-      details = { taskId: randomUUID(), status: 'running', metadataPath: '/task/metadata.json', stdoutPath: '/task/stdout.log', stderrPath: '/task/stderr.log' };
+      details = { taskId: randomUUID(), process: 'running', artifacts: '/task' };
       tasks.set(details.taskId, details);
-    } else if (args.action === 'list') details = { tasks: [...tasks.values()], errors: [] };
+    } else if (args.action === 'list') details = { tasks: [...tasks.values()] };
     else if (args.action === 'status') {
       details = tasks.get(args.taskId);
-      if (!details) return { isError: true, result: { content: [{ type: 'text', text: 'missing' }], details: { action: 'status', taskId: args.taskId, cause: 'Task not found' } } };
-    }
-    else if (args.action === 'cancel') {
-      details = { ...tasks.get(args.taskId), status: 'cancelled' };
+      if (!details) return { isError: true, result: { details: { error: 'Task not found' } } };
+    } else if (args.action === 'cancel') {
+      details = { ...tasks.get(args.taskId), process: 'cancelled' };
       tasks.set(args.taskId, details);
     } else throw new Error('Must not use background cancelAll');
-    return { isError: false, result: { content: [{ type: 'text', text: JSON.stringify(details) }], details } };
+    return { result: { details } };
   };
   const notices = [];
-  const options = { root, owner: 'parent-a', workerPath: '/extension/launch.mjs', sdkPath: '/pi/dist/index.js', agentDir: '/pi/agent', onResult: result => notices.push(result) };
+  const changes = [];
+  const errors = [];
+  const options = { root, owner: 'parent-a', workerPath: '/extension/launch.mjs', sdkPath: '/pi/dist/index.js', agentDir: '/pi/agent', onResult: result => notices.push(result), onChange: row => changes.push(row), onError: error => errors.push(error) };
   let controller = new Controller(options);
   await controller.init();
   const socketDirs = [];
@@ -40,99 +40,147 @@ async function fixture(t) {
     await rm(root, { recursive: true, force: true });
     for (const dir of socketDirs) await rm(dir, { recursive: true, force: true });
   });
-  const call = args => controller.run(args, execute, { cwd: root, model: { provider: 'provider', id: 'model' }, thinkingLevel: 'medium' });
-  const start = async task => {
-    const result = await call({ action: 'start', task });
-    const manifest = JSON.parse(await readFile(result.manifestPath, 'utf8'));
+  const context = { cwd: root, model: { provider: 'provider', id: 'model' }, thinkingLevel: 'medium' };
+  const call = args => controller.run(args, execute, context);
+  const start = async (extra = {}) => {
+    const result = await call({ action: 'start', task: "Inspect; don't execute $(touch unwanted)", model: 'provider/model', ...extra });
+    const manifest = JSON.parse(await readFile(join(result.artifacts, 'manifest.json'), 'utf8'));
     socketDirs.push(manifest.socketDir);
     return { result, manifest };
   };
-  return { root, calls, tasks, options, notices, call, start, watching: () => controller.watchers.size, reload: async () => { await controller.dispose(); controller = new Controller(options); await controller.init(); } };
+  return { root, calls, tasks, options, notices, changes, errors, call, start, context, execute, controller: () => controller, event: event => controller.onProcess(event), reload: async () => { await controller.dispose(); controller = new Controller(options); await controller.init(); } };
 }
 
-test('delegation persists ownership, reconnects after reload, and scopes cancellation away from shell tasks', async t => {
-  const { root, calls, tasks, options, notices, call, start, watching, reload } = await fixture(t);
+test('one-task delegation reconnects, routes one completion, and scopes cancellation', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.call({ action: 'start', task: 'Task' }), /exact model/);
   const foreignId = randomUUID();
-  tasks.set(foreignId, { taskId: foreignId, status: 'running' });
-  const { result, manifest } = await start("Inspect files; don't run shell text: $(touch unwanted)");
-  assert.equal(result.phase, 'starting');
-  assert.ok(calls[0].command.startsWith('exec '));
-  assert.equal(calls[0].command.includes('touch unwanted'), false);
-  assert.equal(manifest.task.includes('touch unwanted'), true);
-  assert.equal(manifest.owner, options.owner);
+  f.tasks.set(foreignId, { taskId: foreignId, process: 'running' });
+  const { result, manifest } = await f.start();
+  const launch = f.calls.find(call => call.action === 'start');
+  assert.ok(launch.command.startsWith('exec '));
+  assert.equal(launch.command.includes('touch unwanted'), false);
+  assert.equal(launch.notificationTarget, 'subagent');
   assert.equal(manifest.thinkingLevel, 'medium');
-  assert.equal((await call({ action: 'list' })).tasks.length, 1);
-  await assert.rejects(call({ action: 'cancel', taskId: foreignId }), /not owned/);
-  const foreign = new Controller({ ...options, owner: 'parent-b' });
-  await foreign.init();
-  t.after(() => foreign.dispose());
-  assert.equal((await foreign.run({ action: 'list' }, async () => ({ result: { details: { tasks: [...tasks.values()], errors: [] } } }), {})).tasks.length, 0);
-  await atomicJson(join(result.artifactDir, 'state.json'), { phase: 'idle', sessionId: 'child', latestResult: { sequence: 1, resultPath: '/result/1.json' } });
-  for (let i = 0; i < 100 && notices.length === 0; i++) await delay(10);
-  assert.equal(notices[0]?.taskId, result.taskId);
-  assert.equal(notices[0]?.sequence, 1);
-  assert.equal(watching(), 1);
-  await reload();
-  assert.equal(watching(), 1);
-  const listed = await call({ action: 'list' });
-  assert.equal(listed.tasks[0].sessionId, 'child');
-  assert.equal(listed.tasks[0].phase, 'idle');
-  assert.equal(notices.length, 1);
+  assert.equal(manifest.version, 2);
+  assert.equal((await f.call({ action: 'list' })).tasks.length, 1);
+  await assert.rejects(f.call({ action: 'cancel', taskId: foreignId }), /not owned/);
+  await atomicJson(join(result.artifacts, 'state.json'), { phase: 'busy' });
+  await f.reload();
+  assert.equal((await f.call({ action: 'list' })).tasks[0].phase, 'busy');
+  assert.equal(f.notices.length, 0);
+  f.changes.length = 0;
+  await f.controller().restore([...f.tasks.values()]);
+  assert.equal(f.changes.length, 1);
+  assert.equal(f.changes[0].taskId, result.taskId);
+  assert.equal(f.changes[0].startedAt, manifest.startedAt);
+  f.controller().onChange = () => { throw new Error('UI unavailable'); };
   const received = [];
   const close = await serve(manifest.socketPath, value => {
     received.push(value);
-    if (value.message === 'Busy') throw Object.assign(new Error('Compaction in progress'), { delivery: 'busy' });
-    return { messageId: value.messageId, disposition: 'started', result: 3 };
+    return { messageId: value.messageId, disposition: 'queued' };
   });
   t.after(close);
   const messageId = randomUUID();
-  const sent = await call({ action: 'send', taskId: result.taskId, message: 'Follow up', messageId });
-  assert.equal(sent.disposition, 'started');
-  assert.equal(sent.result, 3);
-  assert.equal(calls.at(-1).action, 'status');
-  assert.equal(received[0].messageId, messageId);
-  await assert.rejects(call({ action: 'send', taskId: result.taskId, message: 'Busy', messageId }), error => error.delivery === 'busy' && error.messageId === messageId);
-  const cancelled = await call({ action: 'cancelAll' });
+  assert.deepEqual(await f.call({ action: 'send', taskId: result.taskId, message: 'Focus', messageId }), { taskId: result.taskId, messageId, disposition: 'queued' });
+  assert.equal(f.calls.at(-1).action, 'status');
+  await assert.rejects(f.call({ action: 'send', taskId: result.taskId, message: 'Next', mode: 'followUp' }), /Only steering/);
+  await atomicJson(join(result.artifacts, 'result.json'), { status: 'failed', answer: 'Private partial answer', reportedError: { source: 'sdk', message: 'fetch failed https://user:secret@host/path' } });
+  const event = { owner: f.options.owner, type: 'completion', task: { taskId: result.taskId, process: 'succeeded', exitCode: 0 } };
+  await f.event({ ...event, owner: 'other' });
+  await Promise.all([f.event(event), f.event(event)]);
+  assert.equal(f.notices.length, 1);
+  assert.equal(f.notices[0].type, 'subagent-completion');
+  assert.equal(f.errors.at(-1).message, 'UI unavailable');
+  assert.equal(f.notices[0].result, 'failed');
+  assert.equal(f.notices[0].process, 'succeeded');
+  assert.equal(JSON.stringify(f.notices).includes('Private partial'), false);
+  assert.equal(JSON.stringify(f.notices).includes('secret'), false);
+  const cancelled = await f.call({ action: 'cancelAll' });
   assert.equal(cancelled.results.length, 1);
-  assert.equal(tasks.get(foreignId).status, 'running');
+  assert.equal(cancelled.errors, undefined);
+  assert.equal(f.tasks.get(foreignId).process, 'running');
   assert.equal(received.at(-1).action, 'stop');
-  assert.equal((await call({ action: 'list' })).tasks[0].phase, 'terminated');
-  await assert.rejects(call({ action: 'send', taskId: result.taskId, message: 'Late' }), /terminated/);
-  await atomicJson(join(result.artifactDir, 'state.json'), { phase: 'terminated', sessionId: 'child', latestResult: { sequence: 2, resultPath: '/result/2.json' } });
-  for (let i = 0; i < 100 && (notices.length < 2 || watching() > 0); i++) await delay(10);
-  assert.equal(notices[1]?.sequence, 2);
-  assert.equal(watching(), 0);
-  await reload();
-  assert.equal(watching(), 0);
-  assert.equal((await call({ action: 'list' })).tasks[0].phase, 'terminated');
-  tasks.delete(result.taskId);
-  await assert.rejects(call({ action: 'send', taskId: result.taskId, message: 'Lost' }), /Task not found/);
-  tasks.set(result.taskId, { taskId: result.taskId, status: 'cancelled' });
-  assert.equal(calls.some(c => c.action === 'cancelAll'), false);
-  tasks.delete(result.taskId);
-  const unknown = await call({ action: 'list' });
-  assert.equal(unknown.tasks[0].status, 'unknown');
-  assert.equal(unknown.tasks[0].phase, 'unknown');
-  assert.equal(unknown.errors[0].taskId, result.taskId);
-  assert.ok(root);
+  await assert.rejects(f.call({ action: 'send', taskId: result.taskId, message: 'Late' }), /terminated/);
+  f.tasks.delete(result.taskId);
+  assert.equal((await f.call({ action: 'list' })).tasks[0].process, 'unknown');
+  assert.equal(f.calls.some(call => call.action === 'cancelAll'), false);
 });
 
-test('launch failures retain useful artifacts and propagate nested errors instead of claiming a child started', async t => {
-  const { options, root } = await fixture(t);
-  const controller = new Controller(options);
-  await controller.init();
-  t.after(() => controller.dispose());
+test('thinking override, hard termination, and corrupt output remain explicit', async t => {
+  const f = await fixture(t);
+  const { result, manifest } = await f.start({ thinkingLevel: 'high' });
+  assert.equal(manifest.thinkingLevel, 'high');
+  await f.call({ action: 'cancel', taskId: result.taskId });
+  const next = await f.start();
+  const event = { owner: f.options.owner, type: 'completion', task: { taskId: next.result.taskId, process: 'timed_out' } };
+  await f.event(event);
+  assert.equal(f.notices[0].result, 'unavailable');
+  assert.equal(f.notices[0].phase, 'terminated');
+  await writeFile(join(next.result.artifacts, 'state.json'), '{broken');
+  await f.event({ ...event, type: 'status', task: { ...event.task, taskId: result.taskId } });
+  const corruptState = (await f.call({ action: 'list' })).tasks.find(task => task.taskId === next.result.taskId);
+  assert.equal(corruptState.phase, 'unknown');
+  assert.match(corruptState.error, /state.json/);
+  await writeFile(join(next.result.artifacts, 'result.json'), '{broken');
+  assert.equal((await f.call({ action: 'list' })).tasks.find(task => task.taskId === next.result.taskId).result, 'unknown');
+  await writeFile(join(next.result.artifacts, 'binding.json'), '{broken');
+  assert.match((await f.call({ action: 'list' })).errors[0].error, /JSON/);
+  await assert.rejects(f.start(), /unreadable/);
+});
+
+test('launch failure keeps recovery artifacts and cancels a known process', async t => {
+  const f = await fixture(t);
+  const id = randomUUID();
+  const calls = [];
+  const execute = async args => {
+    calls.push(args);
+    if (args.action === 'list') return { result: { details: { tasks: [] } } };
+    if (args.action === 'cancel') throw new Error('Cancellation unavailable');
+    return { isError: true, result: { details: { error: 'Launch interrupted', taskId: id } } };
+  };
   let failure;
-  try {
-    await controller.run({ action: 'start', task: 'Task' }, async () => ({ isError: true, result: { content: [{ type: 'text', text: 'Blocked by policy' }], details: { cause: 'Blocked by policy' } } }), { cwd: root, model: { provider: 'p', id: 'm' } });
-  } catch (error) { failure = error; }
-  assert.match(failure.message, /Blocked by policy/);
-  assert.ok(failure.artifactDir);
-  const launch = JSON.parse(await readFile(join(failure.artifactDir, 'launch-error.json'), 'utf8'));
-  assert.match(launch.error, /Blocked/);
-  const listed = await controller.run({ action: 'list' }, async () => ({ result: { details: { tasks: [], errors: [] } } }), {});
-  assert.equal(listed.tasks.length, 0);
-  assert.equal(listed.errors[0].artifactDir, failure.artifactDir);
+  try { await f.controller().run({ action: 'start', task: 'Task', model: 'provider/model' }, execute, f.context); }
+  catch (error) { failure = error; }
+  assert.match(failure.message, /Launch interrupted/);
+  assert.equal(failure.taskId, id);
+  assert.equal(calls.at(-1).action, 'cancel');
+  assert.match(failure.sideEffects[0], /Cancellation unavailable/);
+  const manifest = JSON.parse(await readFile(join(failure.artifactDir, 'manifest.json'), 'utf8'));
+  t.after(() => rm(manifest.socketDir, { recursive: true, force: true }));
+  const listed = await f.call({ action: 'list' });
+  assert.equal(listed.tasks[0].process, 'unknown');
+  assert.equal(listed.tasks[0].artifacts, failure.artifactDir);
+});
+
+test('completion during launch waits for binding publication and is suppressed after disposal', async t => {
+  const f = await fixture(t);
+  let event;
+  const execute = async args => {
+    const outcome = await f.execute(args);
+    if (args.action === 'start') event = f.event({ owner: f.options.owner, type: 'completion', task: { ...outcome.result.details, process: 'failed' } });
+    return outcome;
+  };
+  const task = await f.controller().run({ action: 'start', task: 'Task', model: 'provider/model' }, execute, f.context);
+  const manifest = JSON.parse(await readFile(join(task.artifacts, 'manifest.json'), 'utf8'));
+  t.after(() => rm(manifest.socketDir, { recursive: true, force: true }));
+  await event;
+  assert.equal(f.notices.length, 1);
+  assert.equal(f.notices[0].taskId, task.taskId);
+  assert.equal(f.notices[0].result, 'unavailable');
+  let finish;
+  let entered;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  f.controller().view = () => { entered(); return new Promise(resolve => { finish = resolve; }); };
+  const oldChanges = f.changes.length;
+  const update = f.controller().changed({ dir: task.artifacts, manifest, binding: task }, task);
+  await waiting;
+  await f.controller().dispose();
+  finish({ taskId: task.taskId });
+  await update;
+  assert.equal(f.changes.length, oldChanges);
+  await f.event({ owner: f.options.owner, type: 'status', task });
+  assert.equal(f.notices.length, 1);
 });
 
 test('socket timeout reports uncertain delivery and preserves the request ID', async t => {

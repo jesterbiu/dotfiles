@@ -2,11 +2,12 @@
 import { parseArgs } from "node:util";
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { networkInterfaces } from "node:os";
 import { startServer } from "../lib/server.js";
 import { sourceLine } from "../lib/source.js";
 
 const usage = `usage:
-  mdreview serve [--port 4747]
+  mdreview serve [--port 4747] [--host 127.0.0.1]
   mdreview comments <doc.md>
   mdreview resolve <doc.md> <id>...`;
 
@@ -14,17 +15,25 @@ const [command, ...rest] = process.argv.slice(2);
 const { values, positionals } = parseArgs({
   args: rest,
   allowPositionals: true,
-  options: { port: { type: "string", default: "4747" } },
+  options: { port: { type: "string", default: "4747" }, host: { type: "string", default: "127.0.0.1" } },
 });
 
-if (command === "serve" && positionals.length === 0) await serve(Number(values.port));
+if (command === "serve" && positionals.length === 0) await serve(Number(values.port), values.host);
 else if (command === "comments" && positionals.length === 1) listComments(docPath(positionals[0]));
 else if (command === "resolve" && positionals.length >= 2) resolveComments(docPath(positionals[0]), positionals.slice(1));
 else fail(usage, 2);
 
-async function serve(port) {
-  const { url } = await startServer({ port });
+async function serve(port, host) {
+  const { url } = await startServer({ port, host });
   console.log(`mdreview: serving ${url}`);
+  if (host === "0.0.0.0") for (const address of lanAddresses()) console.log(`mdreview: serving http://${address}:${new URL(url).port}`);
+}
+
+function lanAddresses() {
+  return Object.values(networkInterfaces())
+    .flat()
+    .filter((i) => i.family === "IPv4" && !i.internal)
+    .map((i) => i.address);
 }
 
 function listComments(doc) {

@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { atomicJson, readJson } from './storage.mjs';
 import { Worker } from './worker.mjs';
 import { createPiRuntime } from './pi-session.mjs';
+import { errorText } from '../background-task/output.mjs';
 
 process.umask(0o077);
 let manifest;
@@ -32,11 +33,10 @@ function shutdown() {
 }
 
 const exit = () => void shutdown().then(() => process.exit(process.exitCode || 0), error => { console.error(error); process.exit(1); });
-for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) process.once(signal, exit);
+for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) process.on(signal, exit);
 
 try {
   manifest = await readJson(process.argv[2]);
-  if (manifest.version !== 1) throw new Error('Unsupported subagent manifest version');
   process.env.PI_CODING_AGENT_DIR = manifest.agentDir;
   delete process.env.PI_SESSION_ID;
   delete process.env.PI_SESSION_FILE;
@@ -45,7 +45,7 @@ try {
     startup.signal.throwIfAborted();
     try {
       const binding = await readJson(join(manifest.dir, 'binding.json'));
-      if (binding.owner !== manifest.owner || !binding.taskId || binding.status !== 'running') throw new Error('Invalid task binding');
+      if (binding.owner !== manifest.owner || !binding.taskId || binding.process !== 'running') throw new Error('Invalid task binding');
       break;
     } catch (error) {
       if (error.code !== 'ENOENT' || Date.now() >= deadline) throw error;
@@ -56,6 +56,13 @@ try {
   if (stopping) {
     await runtime.dispose();
   } else {
+    await atomicJson(join(manifest.dir, 'resolved.json'), {
+      model: { provider: runtime.session.model.provider, id: runtime.session.model.id },
+      thinkingLevel: runtime.session.thinkingLevel,
+      tools: runtime.session.getActiveToolNames(),
+      sessionId: runtime.session.sessionId,
+      sessionFile: runtime.session.sessionFile,
+    });
     worker = new Worker({
       dir: manifest.dir,
       socketPath: manifest.socketPath,
@@ -68,21 +75,17 @@ try {
         void shutdown().catch(cause => { console.error(cause); process.exit(1); });
       },
     });
-    await worker.start({ action: 'send', messageId: manifest.initialMessageId, message: manifest.task, mode: 'steer' });
-    await atomicJson(join(manifest.dir, 'resolved.json'), {
-      model: { provider: runtime.session.model.provider, id: runtime.session.model.id },
-      thinkingLevel: runtime.session.thinkingLevel,
-      tools: runtime.session.getActiveToolNames(),
-      sessionId: runtime.session.sessionId,
-      sessionFile: runtime.session.sessionFile,
-    });
+    await worker.start({ messageId: manifest.initialMessageId, message: manifest.task });
   }
 } catch (error) {
   console.error(error);
   process.exitCode = 1;
   if (manifest) {
     await atomicJson(join(manifest.dir, 'startup-error.json'), { error: error.message, at: Date.now() }).catch(() => {});
-    if (!worker) await atomicJson(join(manifest.dir, 'state.json'), { phase: 'terminated', error: error.message, latestResult: null }).catch(() => {});
+    if (!worker) {
+      await atomicJson(join(manifest.dir, 'result.json'), { status: 'failed', reportedError: { source: 'startup', message: errorText(error.message) } }).catch(() => {});
+      await atomicJson(join(manifest.dir, 'state.json'), { phase: 'terminated', result: 'failed' }).catch(() => {});
+    }
   }
   await shutdown().catch(cause => { console.error(cause); process.exit(1); });
 }

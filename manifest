@@ -1,12 +1,12 @@
 AGENTS.md
-.agent/skills/mdreview/SKILL.md
-.agent/skills/mdreview/README.md
-.agent/skills/mdreview/package.json
-.agent/skills/mdreview/bin
-.agent/skills/mdreview/lib
-.agent/skills/mdreview/public
-.agent/skills/mdreview/test
-.agent/skills/mdreview/docs/design.md
+.agents/skills/mdreview/SKILL.md
+.agents/skills/mdreview/README.md
+.agents/skills/mdreview/package.json
+.agents/skills/mdreview/bin
+.agents/skills/mdreview/lib
+.agents/skills/mdreview/public
+.agents/skills/mdreview/test
+.agents/skills/mdreview/docs/design.md
 
 .claude/settings.json
 .claude/keybindings.json
@@ -16,9 +16,7 @@ AGENTS.md
 
 .pi/agent/settings.json
 .pi/agent/keybindings.json
-.pi/agent/extensions/clear.ts
-src/feature/pi-ext/background-task
-src/feature/pi-ext/subagent
+.pi/agent/extensions
 
 .config/ghostty/config.ghostty
 

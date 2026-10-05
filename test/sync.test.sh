@@ -23,21 +23,28 @@ pi_settings() { mkdir -p "$HOME/.pi/agent" && printf '%s' "$1" > "$HOME/.pi/agen
 
 test_snapshot_follows_manifest() {
   setup
-  mkdir -p "$HOME/.app/skill/lib" "$HOME/src/ext" "$HOME/.pi/agent"
+  mkdir -p "$HOME/.app/skill/lib" "$HOME/src/ext" "$HOME/src/mod" "$HOME/.pi/agent"
   echo conf > "$HOME/.app/conf"
   echo secret > "$HOME/.app/auth.json"
   echo code > "$HOME/.app/skill/lib/a.js"
   printf '#!/bin/sh\n' > "$HOME/.app/run.sh" && chmod +x "$HOME/.app/run.sh"
   echo ext > "$HOME/src/ext/index.ts"
+  echo mod > "$HOME/src/mod/index.ts"
+  echo ui > "$HOME/src/mod/ui.mjs"
+  echo one > "$HOME/src/one.ts"
+  echo other > "$HOME/src/other.ts"
   printf 'keep\ndrop\n' > "$HOME/.rc"
-  pi_settings '{"packages":["npm:pi-vim@1",{"source":"../../src/ext"}],"extensions":["../../src/ext/index.ts"]}'
-  printf '.app/conf\n.app/skill\n.app/run.sh\n\nsrc/ext\n.rc\n' > "$fake/manifest"
+  pi_settings '{"packages":["npm:pi-vim@1",{"source":"../../src/ext"}],"extensions":["../../src/ext/index.ts","../../src/mod/index.ts","../../src/one.ts"]}'
+  printf '.app/conf\n.app/skill\n.app/run.sh\n\n.rc\n' > "$fake/manifest"
   mkdir -p "$fake/distill" && printf '#!/bin/sh\ngrep -v drop\n' > "$fake/distill/.rc" && chmod +x "$fake/distill/.rc"
 
   run_sync || fail "first sync: $(cat "$work/out")"
   assert_content "$fake/home/.app/conf" conf
   assert_content "$fake/home/.app/skill/lib/a.js" code
   assert_content "$fake/home/src/ext/index.ts" ext
+  assert_content "$fake/home/src/mod/ui.mjs" ui
+  assert_content "$fake/home/src/one.ts" one
+  assert_absent "$fake/home/src/other.ts"
   assert_content "$fake/home/.rc" keep
   assert_absent "$fake/home/.app/auth.json"
   assert_absent "$fake/home/.pi"
@@ -45,7 +52,7 @@ test_snapshot_follows_manifest() {
 
   rm "$HOME/.app/skill/lib/a.js"
   echo new > "$HOME/.app/skill/b.js"
-  printf '.app/conf\n.app/skill\nsrc/ext\n' > "$fake/manifest"
+  printf '.app/conf\n.app/skill\n' > "$fake/manifest"
 
   run_sync || fail "second sync: $(cat "$work/out")"
   assert_absent "$fake/home/.app/skill/lib/a.js"
@@ -56,7 +63,6 @@ test_snapshot_follows_manifest() {
 
 test_failed_check_names_path_and_keeps_snapshot() {
   setup
-  mkdir -p "$HOME/src/ext"
   echo conf > "$HOME/.conf"
   printf '.conf\n' > "$fake/manifest"
   run_sync || fail "baseline sync: $(cat "$work/out")"
@@ -68,9 +74,9 @@ test_failed_check_names_path_and_keeps_snapshot() {
   assert_content "$fake/home/.conf" conf
 
   printf '.conf\n' > "$fake/manifest"
-  pi_settings '{"packages":["npm:ok@1"],"extensions":["../../src/ext/index.ts"]}'
-  run_sync && fail "sync passed with uncovered Pi path"
-  grep -q 'src/ext/index.ts' "$work/out" || fail "uncovered Pi path not named: $(cat "$work/out")"
+  pi_settings '{"packages":["npm:ok@1"],"extensions":["../../src/gone/index.ts"]}'
+  run_sync && fail "sync passed with missing Pi path"
+  grep -q 'src/gone' "$work/out" || fail "missing Pi path not named: $(cat "$work/out")"
   assert_content "$fake/home/.conf" conf
 }
 

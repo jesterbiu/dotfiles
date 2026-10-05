@@ -40,7 +40,7 @@ body {
 }
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 820px) 320px;
+  grid-template-columns: 240px minmax(0, 820px) 320px;
   gap: 32px;
   justify-content: center;
   padding: 24px 16px;
@@ -64,8 +64,21 @@ body {
 .diagram path.c-resolved { stroke-dasharray: 4 3 !important; }
 .diagram .active :is(rect, circle, ellipse, polygon, path), .diagram path.active { stroke: var(--accent) !important; stroke-width: 4px !important; }
 .diagram-error { color: #cf222e; white-space: pre-wrap; }
-aside { position: sticky; top: 16px; align-self: start; max-height: calc(100vh - 32px); overflow-y: auto; font-size: 14px; }
-aside h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+#toc, aside { position: sticky; top: 16px; align-self: start; max-height: calc(100vh - 32px); overflow-y: auto; font-size: 14px; }
+aside h2, #toc > summary { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+#toc > summary { cursor: pointer; }
+#toc ul { list-style: none; margin: 0; padding-left: 12px; }
+#toc-entries > ul { padding-left: 0; }
+#toc li { overflow-wrap: anywhere; }
+#toc li summary { display: flex; list-style: none; cursor: pointer; }
+#toc li > a { display: flex; }
+#toc li summary::-webkit-details-marker { display: none; }
+#toc li summary::before, #toc li > a::before { flex: none; width: 1.2em; content: ""; color: var(--muted); }
+#toc li summary::before { content: "\25B8"; }
+#toc li details[open] > summary::before { content: "\25BE"; }
+#toc a { color: var(--fg); text-decoration: none; }
+#toc a:hover { color: var(--accent); }
+#doc :is(h1, h2, h3, h4, h5, h6) { scroll-margin-top: 16px; }
 .entry { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; background: var(--bg); cursor: pointer; }
 .entry.resolved { background: var(--resolved); color: var(--muted); }
 .entry.active { border-color: var(--accent); }
@@ -81,15 +94,21 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 #comment-box { position: absolute; display: none; z-index: 11; width: 300px; padding: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); }
 #comment-box .where { font-size: 12px; color: var(--muted); margin-bottom: 6px; max-height: 3.2em; overflow: hidden; }
 #comment-box textarea { width: 100%; min-height: 80px; font: inherit; font-size: 14px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; }
+@media (pointer: coarse) { #comment-box textarea { font-size: 16px; } }
 #comment-box .actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
-@media (max-width: 1100px) {
+@media (max-width: 1300px) {
   .layout { grid-template-columns: minmax(0, 820px); }
-  aside { position: static; max-height: none; }
+  #toc, aside { position: static; max-height: none; }
+  #toc { margin-bottom: -16px; }
 }
 </style>
 </head>
 <body>
 <div class="layout">
+  <details id="toc">
+    <summary>Contents</summary>
+    <div id="toc-entries"></div>
+  </details>
   <main id="doc"></main>
   <aside>
     <h2 id="summary">Comments</h2>
